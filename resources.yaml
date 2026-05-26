@@ -1,0 +1,194 @@
+# ModelPool Resource Registry
+# Each resource is a tested, benchmarked configuration.
+# What you tested is what runs.
+
+resources:
+  qwen36-27b_mtp_vision_multi-gpu:
+    description: "Qwen3.6-27B Q4_K_M with vision, MTP speculative, 256K ctx, both GPUs"
+    type: managed
+    size_gb: 16
+    ctx: 262144
+    capabilities: [chat, vision, code, agentic]
+    workers: [hwrouter]
+    benchmark:
+      prompt_eval_tps: 91.3
+      generation_tps: 24.0
+      tested_at: "2026-05-25"
+    command:
+      binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
+      flags:
+        - [-m, "/AITOOLCHAIN/models/Qwen3.6-27B/Qwen3.6-27B-Q4_K_M.gguf"]
+        - [--mmproj, "/AITOOLCHAIN/models/Qwen3.6-27B/mmproj-BF16.gguf"]
+        - [-c, "262144"]
+        - [-ngl, "99"]
+        - [-fa, "on"]
+        - [--cache-type-k, q4_0]
+        - [--cache-type-v, q4_0]
+        - [--reasoning, "off"]
+        - [--jinja]
+        - [--chat-template-kwargs, '{"preserve_thinking":true}']
+        - [--no-mmap]
+        - [--kv-unified]
+        - [--tensor-split, "0.5,0.5"]
+        - [--device, "ROCm0,ROCm1"]
+        - [--parallel, "4"]
+        - [--cont-batching]
+        - [--batch-size, "2048"]
+        - [--ubatch-size, "1024"]
+        - [--port, "{inference_port}"]
+        - [--host, "0.0.0.0"]
+        - [--temp, "0.7"]
+        - [--top-p, "0.95"]
+        - [--top-k, "40"]
+        - [--min-p, "0.05"]
+        - [--presence-penalty, "0.0"]
+        - [--spec-type, draft-mtp]
+        - [--spec-draft-n-max, "3"]
+        - [--spec-draft-p-min, "0.75"]
+        - [--cache-ram, "16384"]
+
+  qwen36-35b-a3b_mtp_no-reasoning_multi-gpu:
+    description: "35B MoE (3B active), MTP speculative, reasoning off, 256K ctx, both GPUs"
+    type: managed
+    size_gb: 21
+    ctx: 262144
+    capabilities: [compression, summarize, chat]
+    workers: [hwrouter]
+    benchmark:
+      prompt_eval_tps: 3420
+      generation_tps: 8.2
+      tested_at: "2026-05-25"
+    command:
+      binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
+      flags:
+        - [-m, "/AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf"]
+        - [-c, "262144"]
+        - [-ngl, "99"]
+        - [-fa, "on"]
+        - [--cache-type-k, q8_0]
+        - [--cache-type-v, q8_0]
+        - [--reasoning, "off"]
+        - [--jinja]
+        - [--chat-template-kwargs, '{"preserve_thinking":true}']
+        - [--no-mmap]
+        - [--kv-unified]
+        - [--tensor-split, "0.5,0.5"]
+        - [--device, "ROCm0,ROCm1"]
+        - [--parallel, "1"]
+        - [--cont-batching]
+        - [--batch-size, "1024"]
+        - [--ubatch-size, "512"]
+        - [--port, "{inference_port}"]
+        - [--host, "0.0.0.0"]
+        - [--temp, "0.7"]
+        - [--top-p, "0.95"]
+        - [--top-k, "40"]
+        - [--min-p, "0.05"]
+        - [--presence-penalty, "0.0"]
+        - [--spec-type, draft-mtp]
+        - [--spec-draft-n-max, "3"]
+        - [--spec-draft-p-min, "0.75"]
+        - [--cache-ram, "16384"]
+
+  qwen36-35b-a3b_no-reasoning_cpu:
+    description: "35B MoE on CPU (9850X3D), reasoning off, slow but free"
+    type: managed
+    size_gb: 21
+    ctx: 262144
+    capabilities: [summarize, chat]
+    workers: [aitooolchain]
+    benchmark:
+      prompt_eval_tps: 138
+      generation_tps: 2.0
+      tested_at: "2026-05-25"
+    command:
+      binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
+      flags:
+        - [-m, "/AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf"]
+        - [-c, "262144"]
+        - [-ngl, "0"]
+        - [--threads, "14"]
+        - [-fa, "on"]
+        - [--cache-type-k, q8_0]
+        - [--cache-type-v, q8_0]
+        - [--reasoning, "off"]
+        - [--parallel, "1"]
+        - [--batch-size, "512"]
+        - [--ubatch-size, "256"]
+        - [--port, "{inference_port}"]
+        - [--host, "0.0.0.0"]
+
+  grok-4.3_general:
+    description: "Grok 4.3 via xAI OAuth, 256K ctx, cloud"
+    type: external
+    endpoint: https://api.x.ai/v1
+    auth:
+      method: xai-oauth
+    model: grok-4.3
+    ctx: 256000
+    capabilities: [chat, compression, agentic, vision]
+    workers: [cloud-xai]
+    benchmark:
+      prompt_eval_tps: null
+      generation_tps: null
+
+  glm-45-flash_general:
+    description: "GLM-4.5-Flash free tier via Z.ai global API, 131K ctx"
+    type: external
+    endpoint: https://open.bigmodel.cn/api/paas/v4
+    auth:
+      method: api_key
+      env_var: LM_API_KEY
+    model: glm-4.5-flash
+    ctx: 131072
+    capabilities: [compression, summarize, triage, chat]
+    workers: [cloud-zai-free]
+    benchmark:
+      prompt_eval_tps: null
+      generation_tps: null
+
+workers:
+  hwrouter:
+    host: 192.168.35.185
+    worker_port: 9100
+    inference_port: 8080
+    type: managed
+    vram_gb: 32
+    max_model_gb: 28
+    swap_timeout: 120
+    drain_timeout: 30
+    default_resource: qwen36-27b_mtp_vision_multi-gpu
+
+  aitooolchain:
+    host: 192.168.35.17
+    worker_port: 9100
+    inference_port: 8081
+    type: managed
+    ram_gb: 48
+    max_model_gb: 40
+    swap_timeout: 60
+    drain_timeout: 10
+    default_resource: qwen36-35b-a3b_no-reasoning_cpu
+
+  cloud-xai:
+    type: external
+
+  cloud-zai-free:
+    type: external
+
+routing:
+  compression:
+    resource: qwen36-35b-a3b_mtp_no-reasoning_multi-gpu
+    fallback_resource: glm-45-flash_general
+    fallback_resource_2: grok-4.3_general
+    fallback_resource_3: qwen36-35b-a3b_no-reasoning_cpu
+    timeout: 120
+    idle_revert: 300
+    swap_behavior: queue
+
+  chat:
+    resource: qwen36-27b_mtp_vision_multi-gpu
+    fallback_resource: grok-4.3_general
+    timeout: 120
+    idle_revert: 0
+    swap_behavior: fallback

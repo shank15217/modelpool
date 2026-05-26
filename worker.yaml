@@ -1,0 +1,3 @@
+worker_id: hwrouter
+inference_port: 8080
+log_dir: /var/log/modelpool

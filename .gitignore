@@ -6,14 +6,16 @@ dist/
 build/
 .venv/
 venv/
+*.egg
 
 # Config overrides
-models.local.yaml
-pool.local.yaml
+resources.local.yaml
 worker.local.yaml
+pool.local.yaml
 
 # Logs
 *.log
+/var/log/modelpool/
 
 # IDE
 .idea/
@@ -22,3 +24,8 @@ worker.local.yaml
 
 # OS
 .DS_Store
+
+# Test / cache
+.pytest_cache/
+.coverage
+htmlcov/
