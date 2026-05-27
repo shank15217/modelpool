@@ -1,0 +1,16 @@
+[Unit]
+Description=ModelPool Worker Agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/modelpool
+ExecStart=/opt/modelpool/venv/bin/modelpool-worker --config /etc/modelpool/worker.yaml --registry /etc/modelpool/resources.yaml --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

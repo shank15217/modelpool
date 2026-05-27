@@ -3,38 +3,39 @@
 # What you tested is what runs.
 
 resources:
-  qwen36-27b_mtp_vision_multi-gpu:
-    description: "Qwen3.6-27B Q4_K_M with vision, MTP speculative, 256K ctx, both GPUs"
+  # --- hwrouter managed resources ---
+
+  qwen36-27b_mtp_reasoning_multi-gpu:
+    description: "Qwen3.6-27B MTP with reasoning ON, 131K ctx, both GPUs, 2 parallel slots for coding agents"
     type: managed
     size_gb: 16
-    ctx: 262144
-    capabilities: [chat, vision, code, agentic]
+    ctx: 131072
+    capabilities: [chat, code, agentic, reasoning]
     workers: [hwrouter]
     benchmark:
-      prompt_eval_tps: 91.3
-      generation_tps: 24.0
-      tested_at: "2026-05-25"
+      prompt_eval_tps: null
+      generation_tps: null
+      tested_at: null
     command:
       binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
       flags:
-        - [-m, "/AITOOLCHAIN/models/Qwen3.6-27B/Qwen3.6-27B-Q4_K_M.gguf"]
-        - [--mmproj, "/AITOOLCHAIN/models/Qwen3.6-27B/mmproj-BF16.gguf"]
-        - [-c, "262144"]
+        - [-m, "/AITOOLCHAIN/models/Qwen3.6-27B/Qwen3.6-27B-MTP-Q4_K_M.gguf"]
+        - [-c, "131072"]
         - [-ngl, "99"]
         - [-fa, "on"]
         - [--cache-type-k, q4_0]
         - [--cache-type-v, q4_0]
-        - [--reasoning, "off"]
+        - [--reasoning, "on"]
         - [--jinja]
         - [--chat-template-kwargs, '{"preserve_thinking":true}']
         - [--no-mmap]
         - [--kv-unified]
         - [--tensor-split, "0.5,0.5"]
         - [--device, "ROCm0,ROCm1"]
-        - [--parallel, "4"]
+        - [--parallel, "2"]
         - [--cont-batching]
-        - [--batch-size, "2048"]
-        - [--ubatch-size, "1024"]
+        - [--batch-size, "1024"]
+        - [--ubatch-size, "512"]
         - [--port, "{inference_port}"]
         - [--host, "0.0.0.0"]
         - [--temp, "0.7"]
@@ -48,7 +49,7 @@ resources:
         - [--cache-ram, "16384"]
 
   qwen36-35b-a3b_mtp_no-reasoning_multi-gpu:
-    description: "35B MoE (3B active), MTP speculative, reasoning off, 256K ctx, both GPUs"
+    description: "35B MoE (3B active), MTP speculative, reasoning OFF, 262K ctx, both GPUs. Best for context compression."
     type: managed
     size_gb: 21
     ctx: 262144
@@ -90,6 +91,8 @@ resources:
         - [--spec-draft-p-min, "0.75"]
         - [--cache-ram, "16384"]
 
+  # --- AITOOLCHAIN managed resources ---
+
   qwen36-35b-a3b_no-reasoning_cpu:
     description: "35B MoE on CPU (9850X3D), reasoning off, slow but free"
     type: managed
@@ -117,6 +120,8 @@ resources:
         - [--ubatch-size, "256"]
         - [--port, "{inference_port}"]
         - [--host, "0.0.0.0"]
+
+  # --- External cloud resources ---
 
   grok-4.3_general:
     description: "Grok 4.3 via xAI OAuth, 256K ctx, cloud"
@@ -147,6 +152,8 @@ resources:
       prompt_eval_tps: null
       generation_tps: null
 
+# --- Workers ---
+
 workers:
   hwrouter:
     host: 192.168.35.185
@@ -157,7 +164,7 @@ workers:
     max_model_gb: 28
     swap_timeout: 120
     drain_timeout: 30
-    default_resource: qwen36-27b_mtp_vision_multi-gpu
+    default_resource: qwen36-27b_mtp_reasoning_multi-gpu
 
   aitooolchain:
     host: 192.168.35.17
@@ -176,6 +183,8 @@ workers:
   cloud-zai-free:
     type: external
 
+# --- Routing ---
+
 routing:
   compression:
     resource: qwen36-35b-a3b_mtp_no-reasoning_multi-gpu
@@ -187,7 +196,7 @@ routing:
     swap_behavior: queue
 
   chat:
-    resource: qwen36-27b_mtp_vision_multi-gpu
+    resource: qwen36-27b_mtp_reasoning_multi-gpu
     fallback_resource: grok-4.3_general
     timeout: 120
     idle_revert: 0
