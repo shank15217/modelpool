@@ -35,6 +35,46 @@ Resource = Name + Exact launch command (or external endpoint) + Hardware target 
                     └────────────────┘   └────────────────────┘
 ```
 
+## Current Resources
+
+### Managed Resources (hwrouter: 2x RX 9070 XT, 32GB VRAM)
+
+| Resource | Model | Ctx | Reasoning | Parallel | Best For | Prompt Eval | Generation |
+|---|---|---|---|---|---|---|---|
+| `qwen36-27b_mtp_reasoning_multi-gpu` | Qwen3.6-27B MTP Q4_K_M | 131K | ON | 2 slots | Coding agents, chat, agentic work | 728 t/s | 33.8 t/s |
+| `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | Qwen3.6-35B-A3B MoE (3B active) MTP Q4_K_M | 262K | OFF | 1 slot | Context compression, summarization | 2,225 t/s | 71.4 t/s |
+
+### Managed Resources (AITOOLCHAIN: AMD 9850X3D, 48GB RAM)
+
+| Resource | Model | Ctx | Reasoning | Best For | Prompt Eval | Generation |
+|---|---|---|---|---|---|---|
+| `qwen36-35b-a3b_no-reasoning_cpu` | Qwen3.6-35B-A3B MoE (3B active) MTP Q4_K_M | 262K | OFF | Fallback compression (slow) | 138 t/s | 2.0 t/s |
+
+### External Resources (Cloud)
+
+| Resource | Provider | Model | Ctx | Auth | Best For |
+|---|---|---|---|---|---|
+| `grok-4.3_general` | xAI | grok-4.3 | 256K | OAuth | General fallback, 256K ctx |
+| `glm-45-flash_general` | Z.ai | glm-4.5-flash | 131K | API key (free) | Triage, small compression, summarize |
+
+### Model Selection Guide
+
+| Task | Primary Resource | Why | Swap Time |
+|---|---|---|---|
+| Coding / agentic work | `qwen36-27b_mtp_reasoning_multi-gpu` | Reasoning ON, 2 parallel slots, 33.8 t/s gen | Default (always loaded) |
+| Context compression | `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | 262K ctx, 2225 t/s prompt eval, 71.4 t/s gen | ~8s swap |
+| Triage / title gen | `glm-45-flash_general` | Free cloud, fast, no GPU needed | N/A (external) |
+| Large compression fallback | `grok-4.3_general` | 256K ctx cloud, no swap needed | N/A (external) |
+
+### Swap Performance
+
+Swapping between 27B and 35B-A3B on hwrouter (drain + stop + load + health check):
+
+```
+27B -> 35B-A3B: ~8s (model fits in GPU VRAM cache, fast load)
+35B-A3B -> 27B: ~8s (same)
+```
+
 ## How a Managed Resource Works
 
 ### Step 1: Define the resource in `resources.yaml`
@@ -51,9 +91,9 @@ resources:
     capabilities: [compression, summarize, chat]
     workers: [hwrouter]
     benchmark:
-      prompt_eval_tps: 3420
-      generation_tps: 8.2
-      tested_at: 2026-05-25
+      prompt_eval_tps: 2224.8
+      generation_tps: 71.4
+      tested_at: "2026-05-27"
     command:
       binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
       flags:
@@ -101,16 +141,16 @@ POST http://hwrouter:9100/worker/load
 ```
 Worker state machine during load:
 
-  READY (running qwen36-27b)
+  READY (running qwen36-27b_mtp_reasoning_multi-gpu)
     │
     ▼
   DRAINING
-    │  GET http://localhost:8080/props -> check slots_processing == 0
+    │  GET http://localhost:8080/health -> check slots_processing == 0
     │  Wait up to 30s for in-flight requests to finish
     │  If timeout: force stop anyway
     ▼
   STOPPING
-    │  Send SIGTERM to llama-server process
+    │  Send SIGTERM to llama-server process group
     │  Wait up to 10s for clean exit
     │  If still running: SIGKILL
     │  Verify port 8080 is released
@@ -127,9 +167,9 @@ Worker state machine during load:
     │  Poll health: GET http://localhost:8080/health
     │  Every 2s, up to 120s startup timeout
     │
-    │  Health check returns 200 -> model is loaded and serving
+    │  Health check returns 200 after ~8s
     ▼
-  READY (running qwen36-35b-a3b)
+  READY (running qwen36-35b-a3b_mtp_no-reasoning_multi-gpu)
     Report to pool: resource loaded, ready for requests
 ```
 
@@ -236,7 +276,7 @@ workers:
     max_model_gb: 28
     swap_timeout: 120
     drain_timeout: 30
-    default_resource: qwen36-27b_mtp_vision_multi-gpu
+    default_resource: qwen36-27b_mtp_reasoning_multi-gpu
 
   aitooolchain:
     host: 192.168.35.17
@@ -275,33 +315,20 @@ routing:
     idle_revert: 300
     swap_behavior: queue
 
-  code-review:
-    resource: ornstein-27b-saber_q5_multi-gpu
-    fallback_resource: qwen36-27b_mtp_vision_multi-gpu
-    timeout: 300
-    idle_revert: 180
-    swap_behavior: queue
-
-  triage:
-    resource: glm-45-flash_general              # free, fast, cloud
-    fallback_resource: qwen36-27b_mtp_vision_multi-gpu
-    timeout: 30
-    swap_behavior: fallback
-
   chat:
-    resource: qwen36-27b_mtp_vision_multi-gpu
-    fallback_resource: none
+    resource: qwen36-27b_mtp_reasoning_multi-gpu
+    fallback_resource: grok-4.3_general
     timeout: 120
-    idle_revert: 0
+    idle_revert: 0                              # default resource, never revert
     swap_behavior: fallback
 ```
 
 Fallback chain for compression:
 ```
-1. Local 35B-A3B on GPU (free, fastest at long context)
+1. Local 35B-A3B on GPU (free, 2225 t/s prompt eval, 262K ctx)
 2. GLM-4.5-Flash cloud (free, fast, but 131K ctx limit)
 3. Grok 4.3 cloud (OAuth, 256K ctx, subscription)
-4. Local 35B-A3B on CPU (free, but 12 min for 100K tokens)
+4. Local 35B-A3B on CPU (free, but 138 t/s, 12 min for 100K tokens)
 ```
 
 The pool tries each in order. If a managed resource needs a swap, it waits (queue behavior). If a cloud resource fails, it immediately tries the next fallback.
@@ -318,20 +345,20 @@ The pool tries each in order. If a managed resource needs a swap, it waits (queu
 3. Pool checks: which worker serves this resource? -> hwrouter
 
 4. Pool checks hwrouter: GET http://hwrouter:9100/worker/status
-   Response: { resource: "qwen36-27b_mtp_vision_multi-gpu", state: "ready" }
+   Response: { resource: "qwen36-27b_mtp_reasoning_multi-gpu", state: "ready" }
 
 5. Wrong resource loaded. Pool triggers swap:
    POST http://hwrouter:9100/worker/load
    { "resource": "qwen36-35b-a3b_mtp_no-reasoning_multi-gpu" }
-   Response: 202 { status: "loading", estimated_s: 60 }
+   Response: 202 { status: "loaded", resource: "qwen36-35b-a3b_mtp_no-reasoning_multi-gpu" }
 
-6. Worker lifecycle:
+6. Worker lifecycle (~8s):
    - Drains active slots (30s max)
    - Stops llama-server (SIGTERM, 10s, then SIGKILL)
    - Builds command from resource flags
    - Starts subprocess: /AITOOLCHAIN/llama.cpp/build/bin/llama-server -m ... --port 8080 ...
    - Polls GET http://localhost:8080/health every 2s
-   - Health returns 200 after ~45s
+   - Health returns 200 after ~8s
    - Reports: { state: "ready", resource: "qwen36-35b-a3b_mtp_no-reasoning_multi-gpu" }
 
 7. Pool proxies the original request:
@@ -347,144 +374,30 @@ The pool tries each in order. If a managed resource needs a swap, it waits (queu
 
 ### Subprocess Management
 
-```python
-class LlamaServerManager:
-    """Manages a single llama-server subprocess."""
+The `LlamaServerManager` class manages a single llama-server subprocess:
 
-    def __init__(self, worker_config):
-        self.config = worker_config
-        self.process: subprocess.Popen | None = None
-        self.state: str = "idle"      # idle, loading, ready, draining, stopping, error
-        self.loaded_resource: str | None = None
-        self.log_file: file
+- **start(resource)**: Builds command from resource flags, launches subprocess via `Popen` with `os.setsid` for process group isolation, polls `/health` until 200 OK
+- **stop(timeout=10)**: SIGTERM to process group, wait, SIGKILL if needed
+- **drain(timeout=30)**: Polls `/health` for `slots_processing == 0`
+- **load_resource(resource)**: Full drain -> stop -> start cycle
+- **revert(registry, worker_name)**: Unload and start the worker's default resource
+- **get_status()**: Returns state, loaded_resource, pid, uptime, slot info
 
-    def start(self, resource_def: dict) -> None:
-        """Start llama-server with exact command from resource definition."""
-        # Build command from resource
-        cmd = [resource_def["command"]["binary"]]
-        for flag in resource_def["command"]["flags"]:
-            cmd.extend(flag)
-        
-        # Replace template variables
-        cmd = [s.replace("{inference_port}", str(self.config["inference_port"])) 
-               for s in cmd]
-
-        # Launch as direct subprocess (no shell)
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=self.log_file,
-            stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid,  # process group for clean kill
-        )
-        self.state = "loading"
-
-        # Wait for health check
-        if not self._wait_healthy(timeout=self.config.get("swap_timeout", 120)):
-            raise RuntimeError("llama-server failed to start")
-
-        self.state = "ready"
-        self.loaded_resource = resource_def["name"]
-
-    def stop(self, timeout: int = 10) -> None:
-        """Stop the running llama-server."""
-        if not self.process:
-            return
-
-        # SIGTERM to process group
-        os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-        
-        try:
-            self.process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # SIGKILL to process group
-            os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-            self.process.wait(timeout=5)
-
-        self.process = None
-        self.state = "idle"
-        self.loaded_resource = None
-
-    def drain(self, timeout: int = 30) -> None:
-        """Wait for all in-flight requests to complete."""
-        self.state = "draining"
-        deadline = time.time() + timeout
-
-        while time.time() < deadline:
-            try:
-                resp = requests.get(
-                    f"http://localhost:{self.config['inference_port']}/props",
-                    timeout=2,
-                )
-                if resp.json().get("slots_processing", 1) == 0:
-                    return  # drained
-            except requests.ConnectionError:
-                return  # server down, nothing to drain
-            time.sleep(1)
-
-        # Timeout: force proceed anyway
-
-    def _wait_healthy(self, timeout: int) -> bool:
-        """Poll /health until 200 OK."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                resp = requests.get(
-                    f"http://localhost:{self.config['inference_port']}/health",
-                    timeout=2,
-                )
-                if resp.status_code == 200:
-                    return True
-            except requests.ConnectionError:
-                pass
-            time.sleep(2)
-        return False
-
-    def get_status(self) -> dict:
-        """Current status for /worker/status endpoint."""
-        status = {
-            "state": self.state,
-            "loaded_resource": self.loaded_resource,
-            "pid": self.process.pid if self.process else None,
-        }
-        
-        if self.state == "ready":
-            try:
-                resp = requests.get(
-                    f"http://localhost:{self.config['inference_port']}/health",
-                    timeout=2,
-                )
-                health = resp.json()
-                status["slots_idle"] = health.get("slots_idle", 0)
-                status["slots_processing"] = health.get("slots_processing", 0)
-            except:
-                status["state"] = "error"
-        
-        return status
-```
+State machine: `IDLE -> LOADING -> READY -> DRAINING -> STOPPING -> IDLE` (or ERROR at any point)
 
 ### Watchdog
 
-The worker runs a background thread that checks llama-server health every 15s:
+Background asyncio task that monitors llama-server health every 15s. On 3 consecutive failures, it marks the worker as ERROR and auto-recovers by restarting with the default resource.
 
-```python
-async def watchdog():
-    while True:
-        await asyncio.sleep(15)
-        if manager.state == "ready":
-            try:
-                resp = requests.get(
-                    f"http://localhost:{config['inference_port']}/health",
-                    timeout=5,
-                )
-                if resp.status_code != 200:
-                    manager.state = "error"
-            except:
-                manager.state = "error"
-                # Auto-recover: stop broken process, load default
-                manager.stop()
-                default = registry.get_default_resource(worker_id)
-                manager.start(default)
-```
+### Worker HTTP API
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/worker/status` | GET | Current state, loaded resource, pid, uptime, slots |
+| `/worker/load` | POST | Load a resource (drain -> stop -> start) |
+| `/worker/unload` | POST | Drain and stop, leave idle |
+| `/worker/ready` | GET | 200 if ready, 503 otherwise |
+| `/worker/revert` | POST | Revert to default resource |
 
 ## Auth for External Resources
 
@@ -492,36 +405,25 @@ The pool needs to inject credentials when proxying to external resources. Auth m
 
 | Method | How it works |
 |---|---|
-| `xai-oauth` | Read tokens from `~/.hermes/auth.json`, refresh if expired, inject as `Authorization: Bearer <token>` |
-| `api_key` | Read key from env var, inject as `Authorization: Bearer <key>` |
+| `xai-oauth` | Read tokens from `~/.hermes/auth.json`, refresh if expired, inject as `Authorization: Bearer ***` |
+| `api_key` | Read key from env var, inject as `Authorization: Bearer ***` |
 | `none` | No auth (local endpoints) |
-
-```python
-def inject_auth(request_headers: dict, auth_config: dict) -> dict:
-    if auth_config["method"] == "xai-oauth":
-        creds = resolve_xai_oauth_runtime_credentials()
-        request_headers["Authorization"] = f"Bearer {creds['api_key']}"
-    elif auth_config["method"] == "api_key":
-        key = os.environ.get(auth_config["env_var"], "")
-        request_headers["Authorization"] = f"Bearer {key}"
-    return request_headers
-```
 
 ## Deployment
 
 ```
 Hermes Host (192.168.35.x)
-├── modelpool-pool (port 9000)     # systemd service
+├── modelpool-pool (port 9000)     # systemd service (Phase 2, not yet implemented)
 └── resources.yaml                  # shared config
 
 Managed Workers
 ├── hwrouter (192.168.35.185)
-│   ├── modelpool-worker (port 9100)  # systemd service
+│   ├── modelpool-worker (port 9100)  # systemd service -- ACTIVE
 │   ├── llama-server (port 8080)      # managed subprocess
-│   └── resources.yaml                 # copy of shared config
+│   └── resources.yaml                # copy at /etc/modelpool/resources.yaml
 └── aitooolchain (192.168.35.17)
-    ├── modelpool-worker (port 9100)
-    ├── llama-server (port 8081)
+    ├── modelpool-worker (port 9100)  # not yet deployed
+    ├── llama-server (port 8081)      # managed subprocess
     └── resources.yaml
 
 External Workers (no agent needed)

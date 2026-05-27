@@ -13,9 +13,9 @@ resources:
     capabilities: [chat, code, agentic, reasoning]
     workers: [hwrouter]
     benchmark:
-      prompt_eval_tps: null
-      generation_tps: null
-      tested_at: null
+      prompt_eval_tps: 727.8
+      generation_tps: 33.8
+      tested_at: "2026-05-27"
     command:
       binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
       flags:
@@ -56,9 +56,9 @@ resources:
     capabilities: [compression, summarize, chat]
     workers: [hwrouter]
     benchmark:
-      prompt_eval_tps: 3420
-      generation_tps: 8.2
-      tested_at: "2026-05-25"
+      prompt_eval_tps: 2224.8
+      generation_tps: 71.4
+      tested_at: "2026-05-27"
     command:
       binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
       flags:
