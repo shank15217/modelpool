@@ -44,11 +44,11 @@ Resource = Name + Exact launch command (or external endpoint) + Hardware target 
 | `qwen36-27b_mtp_reasoning_multi-gpu` | Qwen3.6-27B MTP Q4_K_M | 131K | ON | 2 slots | Coding agents, chat, agentic work | 728 t/s | 33.8 t/s |
 | `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | Qwen3.6-35B-A3B MoE (3B active) MTP Q4_K_M | 262K | OFF | 1 slot | Context compression, summarization | 2,225 t/s | 71.4 t/s |
 
-### Managed Resources (AITOOLCHAIN: AMD 9850X3D, 48GB RAM)
+### Managed Resources (AITOOLCHAIN: AMD 9850X3D, 48GB RAM, ik_llama.cpp)
 
 | Resource | Model | Ctx | Reasoning | Best For | Prompt Eval | Generation |
 |---|---|---|---|---|---|---|
-| `qwen36-35b-a3b_no-reasoning_cpu` | Qwen3.6-35B-A3B MoE (3B active) MTP Q4_K_M | 262K | OFF | Fallback compression (slow) | 138 t/s | 2.0 t/s |
+| `qwen36-35b-a3b_no-reasoning_cpu` | Qwen3.6-35B-A3B MoE (3B active) MTP Q4_K_M | 262K | OFF | Title gen, triage, summarize, code review | 473 t/s | 39.4 t/s |
 
 ### External Resources (Cloud)
 
@@ -63,7 +63,8 @@ Resource = Name + Exact launch command (or external endpoint) + Hardware target 
 |---|---|---|---|
 | Coding / agentic work | `qwen36-27b_mtp_reasoning_multi-gpu` | Reasoning ON, 2 parallel slots, 33.8 t/s gen | Default (always loaded) |
 | Context compression | `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | 262K ctx, 2225 t/s prompt eval, 71.4 t/s gen | ~8s swap |
-| Triage / title gen | `glm-45-flash_general` | Free cloud, fast, no GPU needed | N/A (external) |
+| Title gen / triage | `qwen36-35b-a3b_no-reasoning_cpu` | Free CPU, 473 t/s prompt eval, sub-10s response | N/A (always on) |
+| Triage / small tasks | `glm-45-flash_general` | Free cloud, fast, no GPU needed | N/A (external) |
 | Large compression fallback | `grok-4.3_general` | 256K ctx cloud, no swap needed | N/A (external) |
 
 ### Swap Performance
@@ -328,7 +329,7 @@ Fallback chain for compression:
 1. Local 35B-A3B on GPU (free, 2225 t/s prompt eval, 262K ctx)
 2. GLM-4.5-Flash cloud (free, fast, but 131K ctx limit)
 3. Grok 4.3 cloud (OAuth, 256K ctx, subscription)
-4. Local 35B-A3B on CPU (free, but 138 t/s, 12 min for 100K tokens)
+4. Local 35B-A3B on CPU (free, 473 t/s prompt eval, ik_llama.cpp)
 ```
 
 The pool tries each in order. If a managed resource needs a swap, it waits (queue behavior). If a cloud resource fails, it immediately tries the next fallback.

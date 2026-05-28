@@ -15,6 +15,12 @@ A **resource** is a fully configured model recipe -- the GGUF weights file plus 
 
 Swap time between resources: ~8 seconds.
 
+### AITOOLCHAIN (AMD 9850X3D, 48GB RAM, ik_llama.cpp)
+
+| Resource | Model | Ctx | Speed (prompt/gen) | Best For |
+|---|---|---|---|---|
+| `qwen36-35b-a3b_no-reasoning_cpu` | 35B MoE (3B active), reasoning OFF | 262K | 473 / 39.4 t/s | Title gen, triage, summarize (always on) |
+
 ### Cloud (External)
 
 | Resource | Provider | Ctx | Auth | Best For |

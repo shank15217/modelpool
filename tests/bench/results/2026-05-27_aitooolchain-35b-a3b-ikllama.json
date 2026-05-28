@@ -1,0 +1,22 @@
+{
+  "resource": "qwen36-35b-a3b_no-reasoning_cpu",
+  "endpoint": "http://192.168.35.17:8081",
+  "timestamp": "2026-05-27T23:50:00",
+  "hardware": "AMD 9850X3D, 48GB RAM, ik_llama.cpp",
+  "config": "8 threads, merge-up-gate-experts, MTP spec-stage, ctx-checkpoints 256",
+  "summary": {"prompt_eval_tps": 473.1, "generation_tps": 39.4},
+  "results": [
+    {"test": "prompt_eval_1K", "prompt_tokens": 1347, "completion_tokens": 10, "time_s": 4.5, "prompt_eval_tps": 302.7},
+    {"test": "prompt_eval_4K", "prompt_tokens": 5307, "completion_tokens": 10, "time_s": 16.3, "prompt_eval_tps": 325.8},
+    {"test": "prompt_eval_8K", "prompt_tokens": 10587, "completion_tokens": 10, "time_s": 22.4, "prompt_eval_tps": 473.1},
+    {"test": "prompt_eval_16K", "prompt_tokens": 21147, "completion_tokens": 10, "time_s": 45.3, "prompt_eval_tps": 467.0},
+    {"test": "prompt_eval_32K", "prompt_tokens": 42267, "completion_tokens": 18, "time_s": 119.5, "prompt_eval_tps": 353.6},
+    {"test": "generation_64", "prompt_tokens": 42, "completion_tokens": 64, "time_s": 2.4, "generation_tps": 27.2},
+    {"test": "generation_256", "prompt_tokens": 42, "completion_tokens": 256, "time_s": 7.0, "generation_tps": 36.7},
+    {"test": "generation_512", "prompt_tokens": 42, "completion_tokens": 512, "time_s": 13.0, "generation_tps": 39.4},
+    {"test": "title_gen_3K", "prompt_tokens": 3991, "completion_tokens": 7, "time_s": 6.3, "overall_tps": 633.6},
+    {"test": "triage_2K", "prompt_tokens": 2673, "completion_tokens": 10, "time_s": 2.4, "overall_tps": 1113.3},
+    {"test": "summarize_8K", "prompt_tokens": 10593, "completion_tokens": 58, "time_s": 30.3, "overall_tps": 351.5},
+    {"test": "code_review", "prompt_tokens": 119, "completion_tokens": 200, "time_s": 6.5, "overall_tps": 48.9}
+  ]
+}

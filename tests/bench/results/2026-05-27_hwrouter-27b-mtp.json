@@ -1,0 +1,13 @@
+{
+  "resource": "qwen36-27b_mtp_reasoning_multi-gpu",
+  "endpoint": "http://192.168.35.185:8080",
+  "timestamp": "2026-05-27T02:30:00",
+  "hardware": "2x RX 9070 XT (ROCm), 32GB VRAM",
+  "summary": {"prompt_eval_tps": 727.8, "generation_tps": 33.8},
+  "results": [
+    {"test": "prompt_eval_1K", "prompt_tokens": 24, "completion_tokens": 5, "time_s": 0.5, "overall_tps": 55.6},
+    {"test": "prompt_eval_10K", "prompt_tokens": 3224, "completion_tokens": 50, "time_s": 4.4, "overall_tps": 738.6},
+    {"generation_short", "prompt_tokens": 31, "completion_tokens": 256, "time_s": 6.4, "overall_tps": 44.7},
+    {"generation_medium", "prompt_tokens": 53, "completion_tokens": 1024, "time_s": 30.3, "overall_tps": 35.6}
+  ]
+}

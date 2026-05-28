@@ -1,0 +1,4 @@
+# Benchmark Results
+
+Raw JSON benchmark outputs from `bench_resource.py` and `bench_parallel.py`.
+Run `modelpool-bench --endpoint <url> --json > results/<name>.json` to add new results.

@@ -94,32 +94,42 @@ resources:
   # --- AITOOLCHAIN managed resources ---
 
   qwen36-35b-a3b_no-reasoning_cpu:
-    description: "35B MoE on CPU (9850X3D), reasoning off, slow but free"
+    description: "35B MoE on CPU (9850X3D), ik_llama.cpp, reasoning off, 8 threads"
     type: managed
     size_gb: 21
     ctx: 262144
-    capabilities: [summarize, chat]
+    capabilities: [title-gen, triage, summarize, code-review, chat]
     workers: [aitooolchain]
     benchmark:
-      prompt_eval_tps: 138
-      generation_tps: 2.0
-      tested_at: "2026-05-25"
+      prompt_eval_tps: 473.1
+      generation_tps: 39.4
+      tested_at: "2026-05-27"
     command:
-      binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
+      binary: /AITOOLCHAIN/ik_llama.cpp/build/bin/llama-server
       flags:
         - [-m, "/AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf"]
         - [-c, "262144"]
         - [-ngl, "0"]
-        - [--threads, "14"]
         - [-fa, "on"]
         - [--cache-type-k, q8_0]
         - [--cache-type-v, q8_0]
         - [--reasoning, "off"]
+        - [--jinja]
+        - [--chat-template-kwargs, '{"preserve_thinking":true}']
+        - [--threads, "8"]
         - [--parallel, "1"]
-        - [--batch-size, "512"]
+        - [--batch-size, "2048"]
         - [--ubatch-size, "256"]
+        - [--spec-stage, "mtp:n_max=3,p_min=0.75"]
         - [--port, "{inference_port}"]
         - [--host, "0.0.0.0"]
+        - [--temp, "0.7"]
+        - [--top-p, "0.95"]
+        - [--top-k, "40"]
+        - [--min-p, "0.05"]
+        - [--merge-up-gate-experts]
+        - [--cache-ram, "16384"]
+        - [--ctx-checkpoints, "256"]
 
   # --- External cloud resources ---
 

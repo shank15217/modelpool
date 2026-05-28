@@ -1,0 +1,46 @@
+{
+  "resource": "qwen36-27b_mtp_reasoning_multi-gpu",
+  "endpoint": "http://192.168.35.185:8080",
+  "timestamp": "2026-05-27T02:45:00",
+  "hardware": "2x RX 9070 XT (ROCm), 32GB VRAM",
+  "config": "2 parallel slots, reasoning ON",
+  "summary": {
+    "sequential_tps": 37.0,
+    "concurrent_2_tps": 50.2,
+    "speedup_2x": 1.93
+  },
+  "results": [
+    {
+      "test": "sequential",
+      "requests": 3,
+      "total_tokens": 1617,
+      "wall_time_s": 45.14,
+      "throughput_tps": 35.8,
+      "per_request": [
+        {"label": "req_0", "total_tokens": 559, "time_s": 14.8},
+        {"label": "req_1", "total_tokens": 566, "time_s": 15.5},
+        {"label": "req_2", "total_tokens": 568, "time_s": 14.84}
+      ]
+    },
+    {
+      "test": "concurrent_2",
+      "requests": 2,
+      "total_tokens": 1125,
+      "wall_time_s": 22.45,
+      "throughput_tps": 50.2,
+      "speedup_vs_sequential": 1.94,
+      "per_request": [
+        {"label": "slot_0", "total_tokens": 559, "time_s": 21.17},
+        {"label": "slot_1", "total_tokens": 568, "time_s": 22.44}
+      ]
+    },
+    {
+      "test": "concurrent_3",
+      "requests": 3,
+      "total_tokens": 927,
+      "wall_time_s": 18.70,
+      "throughput_tps": 49.5,
+      "note": "3rd request queued behind 2 slots, no degradation"
+    }
+  ]
+}
