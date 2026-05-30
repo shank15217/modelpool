@@ -99,7 +99,7 @@ resources:
     size_gb: 21
     ctx: 262144
     capabilities: [title-gen, triage, summarize, code-review, chat]
-    workers: [aitooolchain]
+    workers: [pvellm]
     benchmark:
       prompt_eval_tps: 473.1
       generation_tps: 39.4
@@ -176,7 +176,7 @@ workers:
     drain_timeout: 30
     default_resource: qwen36-27b_mtp_reasoning_multi-gpu
 
-  aitooolchain:
+  pvellm:
     host: 192.168.35.17
     worker_port: 9100
     inference_port: 8081

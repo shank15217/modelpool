@@ -44,7 +44,7 @@ Resource = Name + Exact launch command (or external endpoint) + Hardware target 
 | `qwen36-27b_mtp_reasoning_multi-gpu` | Qwen3.6-27B MTP Q4_K_M | 131K | ON | 2 slots | Coding agents, chat, agentic work | 728 t/s | 33.8 t/s |
 | `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | Qwen3.6-35B-A3B MoE (3B active) MTP Q4_K_M | 262K | OFF | 1 slot | Context compression, summarization | 2,225 t/s | 71.4 t/s |
 
-### Managed Resources (AITOOLCHAIN: AMD 9850X3D, 48GB RAM, ik_llama.cpp)
+### Managed Resources (pvellm: AMD 9850X3D, 48GB RAM, ik_llama.cpp)
 
 | Resource | Model | Ctx | Reasoning | Best For | Prompt Eval | Generation |
 |---|---|---|---|---|---|---|
@@ -422,7 +422,7 @@ Managed Workers
 │   ├── modelpool-worker (port 9100)  # systemd service -- ACTIVE
 │   ├── llama-server (port 8080)      # managed subprocess
 │   └── resources.yaml                # copy at /etc/modelpool/resources.yaml
-└── aitooolchain (192.168.35.17)
+└── pvellm (192.168.35.17)
     ├── modelpool-worker (port 9100)  # not yet deployed
     ├── llama-server (port 8081)      # managed subprocess
     └── resources.yaml
