@@ -1,3 +1,4 @@
 worker_id: hwrouter
 inference_port: 8080
 log_dir: /var/log/modelpool
+idle_shutdown: 900  # 15 minutes of no activity -> unload model, free VRAM

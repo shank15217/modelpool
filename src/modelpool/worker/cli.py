@@ -70,6 +70,7 @@ def main() -> None:
     worker_name = wconfig.get("worker_id", "unknown")
     inference_port = wconfig.get("inference_port", 8080)
     log_dir = wconfig.get("log_dir", "/var/log/modelpool")
+    idle_shutdown = wconfig.get("idle_shutdown", 0)
 
     # Get worker from registry for settings
     try:
@@ -81,16 +82,20 @@ def main() -> None:
     # Create manager, watchdog, configure app
     manager = LlamaServerManager(inference_port=inference_port, log_dir=log_dir)
     watchdog = Watchdog(manager, registry, worker_name)
-    configure(manager, registry, watchdog, worker_name)
+    configure(manager, registry, watchdog, worker_name, idle_shutdown=idle_shutdown)
 
-    # Auto-load default resource on startup
-    try:
-        default_resource = registry.get_default_resource(worker_name)
-        logging.info(f"Loading default resource: {default_resource.name}")
-        manager.start(default_resource)
-    except Exception as e:
-        logging.warning(f"Could not load default resource: {e}")
-        logging.warning("Worker starting in idle state")
+    # Start idle -- don't load any model until the pool requests one
+    if idle_shutdown > 0:
+        logging.info(f"Idle shutdown enabled ({idle_shutdown}s). Starting idle, no model loaded.")
+    else:
+        # Legacy behavior: load default resource on startup
+        try:
+            default_resource = registry.get_default_resource(worker_name)
+            logging.info(f"Loading default resource: {default_resource.name}")
+            manager.start(default_resource)
+        except Exception as e:
+            logging.warning(f"Could not load default resource: {e}")
+            logging.warning("Worker starting in idle state")
 
     # Start serving
     logging.info(f"Worker '{worker_name}' listening on {args.host}:{args.port}")

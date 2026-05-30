@@ -130,15 +130,16 @@ class Router:
         Checks each worker that can serve this resource:
         1. If already loaded -> use immediately (no swap)
         2. If worker is ready with something else -> candidate for swap
-        3. If worker is busy (loading/draining) -> skip
+        3. If worker is idle (no model loaded) -> candidate for cold load
+        4. If worker is busy (loading/draining) -> skip
         """
         workers = self.registry.get_workers_for_resource(resource.name)
         if not workers:
             return None
 
-        # Check each worker's current state
         ready_with_resource = None
         ready_for_swap = None
+        idle_worker = None
 
         for worker in workers:
             status = self._get_worker_status(worker)
@@ -165,12 +166,27 @@ class Router:
                 )
 
             # Good: worker is ready but has a different resource
-            if state == "ready" and ready_for_swap is None:
+            if state == "ready" and loaded and ready_for_swap is None:
                 ready_for_swap = (worker, loaded)
 
-            # Track if any worker has the resource
-            if loaded == resource.name and state == "ready":
-                ready_with_resource = (worker, loaded)
+            # Good: worker is idle (no model loaded) -- cold start
+            if state == "idle" and idle_worker is None:
+                idle_worker = worker
+
+        # Prefer idle worker (cold start is clean, no drain needed)
+        if idle_worker:
+            logger.info(
+                f"Resource '{resource.name}' needs cold load on idle "
+                f"worker '{idle_worker.name}'"
+            )
+            return Resolution(
+                task_type=route.task_type,
+                resource=resource,
+                worker=idle_worker,
+                needs_swap=True,
+                currently_loaded=None,
+                route=route,
+            )
 
         # Use a worker that's ready for a swap
         if ready_for_swap:
