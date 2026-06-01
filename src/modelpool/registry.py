@@ -38,6 +38,7 @@ class Resource:
     workers: list[str] = field(default_factory=list)
     tags: dict[str, int] = field(default_factory=dict)  # tag -> priority (lower=better)
     benchmark: Benchmark = field(default_factory=Benchmark)
+    generalist: bool = False   # when loaded, prefer for any tag if capacity exists
 
     # Managed resource fields
     binary: Optional[str] = None
@@ -67,6 +68,7 @@ class Worker:
     drain_timeout: int = 30
     default_resource: Optional[str] = None
     pool_secret: Optional[str] = None  # shared secret for pool-worker pairing
+    max_concurrent_models: int = 1  # how many different models this worker can run at once
 
     @property
     def worker_url(self) -> str:
@@ -224,6 +226,7 @@ class Registry:
                 drain_timeout=wdef.get("drain_timeout", 30),
                 default_resource=wdef.get("default_resource"),
                 pool_secret=wdef.get("pool_secret"),
+                max_concurrent_models=wdef.get("max_concurrent_models", 1),
             )
             self._workers[name] = worker
 
