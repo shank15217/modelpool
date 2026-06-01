@@ -115,7 +115,7 @@ class TestGeneralistPreference:
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: {"state": "ready", "loaded_resource": "gpu-27b",
-                          "loaded_models_count": 0},
+                          "loaded_models_count": 1},
         )
         res = router.resolve("compression")
         # Generalist 27B is loaded and has capacity -> should use it
@@ -128,7 +128,7 @@ class TestGeneralistPreference:
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: {"state": "ready", "loaded_resource": "gpu-27b",
-                          "loaded_models_count": 0},
+                          "loaded_models_count": 1},
         )
         res = router.resolve("title")
         assert res.resource.generalist is True
@@ -140,7 +140,7 @@ class TestGeneralistPreference:
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: {"state": "ready", "loaded_resource": "gpu-27b",
-                          "loaded_models_count": 0},
+                          "loaded_models_count": 1},
         )
         res = router.resolve("chat")
         assert res.resource.name == "gpu-27b"
@@ -240,13 +240,13 @@ class TestNoSwapWhenBusy:
 
     @patch("modelpool.pool.router.requests.get")
     def test_busy_worker_not_swapped_for_different_tag(self, mock_get, router):
-        """27B is loaded and at capacity -> compression goes to CPU, not swap GPU."""
+        """Worker in draining/loading state is skipped, falls to CPU."""
         def side_effect(url, **kwargs):
             mock_resp = MagicMock(status_code=200)
             if "192.168.35.185" in url:
-                # hwrouter: 27B loaded, at capacity (1/1)
+                # hwrouter: actively draining (busy, cannot accept swap)
                 mock_resp.json = lambda: {
-                    "state": "ready", "loaded_resource": "gpu-27b",
+                    "state": "draining", "loaded_resource": "gpu-27b",
                     "loaded_models_count": 1,
                 }
             elif "192.168.35.17" in url:
@@ -259,9 +259,8 @@ class TestNoSwapWhenBusy:
 
         mock_get.side_effect = side_effect
         res = router.resolve("compression")
-        # 27B is generalist but at capacity -> cannot use it
-        # gpu-35b would need a swap on hwrouter but hwrouter is at capacity
-        # Should fall through to cpu-35b (priority 2 for compression)
+        # hwrouter is draining -> not ready -> swap blocked -> skip
+        # Falls to cpu-35b on pvellm
         assert res.resource.name == "cpu-35b"
         assert res.worker.name == "pvellm"
         assert res.needs_swap is True
@@ -290,29 +289,29 @@ class TestNoSwapWhenBusy:
         assert res.needs_swap is False
 
     @patch("modelpool.pool.router.requests.get")
-    def test_all_workers_at_capacity_raises_error(self, mock_get, router):
-        """All workers at capacity -> RoutingError (no rug pulls)."""
+    def test_all_workers_busy_raises_error(self, mock_get, router):
+        """All workers in busy state -> RoutingError."""
         def side_effect(url, **kwargs):
             mock_resp = MagicMock(status_code=200)
             mock_resp.json = lambda: {
-                "state": "ready", "loaded_resource": "gpu-35b",
+                "state": "loading", "loaded_resource": "gpu-35b",
                 "loaded_models_count": 1,
             }
             return mock_resp
 
         mock_get.side_effect = side_effect
         # "agentic" is only tagged on gpu-27b (worker hwrouter)
-        # If hwrouter is at capacity with a different model, no swap should happen
+        # All workers are loading/draining -> no match -> RoutingError
         with pytest.raises(RoutingError):
             router.resolve("agentic")
 
     @patch("modelpool.pool.router.requests.get")
-    def test_idle_worker_preferred_over_busy_for_swap(self, mock_get, router):
-        """If an idle worker exists, prefer cold load over swapping a busy worker."""
+    def test_loaded_generalist_wins_over_swap_and_idle(self, mock_get, router):
+        """Loaded generalist with capacity serves the request, no swap needed."""
         def side_effect(url, **kwargs):
             mock_resp = MagicMock(status_code=200)
             if "192.168.35.185" in url:
-                # hwrouter: busy with 27B
+                # hwrouter: 27B generalist loaded with capacity
                 mock_resp.json = lambda: {
                     "state": "ready", "loaded_resource": "gpu-27b",
                     "loaded_models_count": 1,
@@ -327,5 +326,9 @@ class TestNoSwapWhenBusy:
 
         mock_get.side_effect = side_effect
         res = router.resolve("title")
-        # Should use pvellm (idle) rather than swap hwrouter (busy)
-        assert res.worker.name == "pvellm"
+        # 27B generalist is loaded -> serves title directly (no swap)
+        # Even though gpu-35b has higher priority for title,
+        # avoiding a swap is preferred
+        assert res.resource.name == "gpu-27b"
+        assert res.resource.generalist is True
+        assert res.needs_swap is False

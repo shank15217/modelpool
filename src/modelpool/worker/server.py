@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -139,10 +140,10 @@ async def pool_auth_middleware(request: Request, call_next):
     Open endpoints: /worker/status, /worker/ready (monitoring)
     Inference port (8080) is not handled by this server.
     """
-    if request.url.path in PROTECTED_ENDPOINTS:
+    if request.url.path.rstrip("/") in PROTECTED_ENDPOINTS:
         if _pool_secret:
             provided = request.headers.get(SECRET_HEADER, "")
-            if provided != _pool_secret:
+            if not hmac.compare_digest(provided, _pool_secret):
                 logger.warning(
                     f"Unauthorized management request: {request.url.path} "
                     f"from {request.client.host if request.client else 'unknown'}"
@@ -201,9 +202,10 @@ async def worker_load(req: LoadRequest):
             f"Worker busy (state: {_manager.state}). Try again later."
         )
 
-    # Execute the swap
+    # Execute the swap (offload to thread to avoid blocking event loop)
     try:
-        _manager.load_resource(
+        await asyncio.to_thread(
+            _manager.load_resource,
             resource,
             drain_timeout=worker.drain_timeout,
             swap_timeout=worker.swap_timeout,
@@ -226,7 +228,7 @@ async def worker_unload():
         raise HTTPException(409, f"Cannot unload from state: {_manager.state}")
 
     worker = _registry.get_worker(_worker_name) if _registry else None
-    _manager.unload(drain_timeout=worker.drain_timeout if worker else 30)
+    await asyncio.to_thread(_manager.unload, drain_timeout=worker.drain_timeout if worker else 30)
     return {"status": "unloaded"}
 
 
@@ -250,7 +252,7 @@ async def worker_revert():
         raise HTTPException(409, f"Worker busy (state: {_manager.state})")
 
     try:
-        _manager.revert(_registry, _worker_name)
+        await asyncio.to_thread(_manager.revert, _registry, _worker_name)
         default = _registry.get_worker(_worker_name).default_resource
         _touch_request_time()
         return {"status": "reverted", "resource": default}

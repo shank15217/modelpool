@@ -202,8 +202,12 @@ async def _idle_timer_loop():
                     try:
                         worker = _registry.get_worker(worker_name)
                         import requests as sync_requests
+                        headers = {}
+                        if worker.pool_secret:
+                            headers["X-Pool-Secret"] = worker.pool_secret
                         sync_requests.post(
                             f"{worker.worker_url}/worker/revert",
+                            headers=headers,
                             timeout=120,
                         )
                     except Exception as e:

@@ -96,8 +96,7 @@ class PoolProxy:
         target_url = f"{resolution.inference_url}/v1/chat/completions"
         headers = self._build_proxy_headers(request, resolution)
 
-        # Check if streaming
-        body_json = _safe_json(body)
+        # Check if streaming (body_json already parsed above)
         stream = body_json.get("stream", False) if body_json else False
 
         try:

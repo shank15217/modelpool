@@ -157,11 +157,16 @@ class TestResolveWithWorkerStatus:
     @patch("modelpool.pool.router.requests.get")
     def test_resolve_swap_needed(self, mock_get, router):
         """Worker has wrong model loaded -> needs swap."""
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gpu-compress-model",
-                          "loaded_models_count": 0},
-        )
+        def side_effect(url, **kwargs):
+            m = MagicMock(status_code=200)
+            if "192.168.1.100" in url:
+                m.json = lambda: {"state": "ready", "loaded_resource": "gpu-compress-model",
+                                  "loaded_models_count": 1}
+            else:
+                m.json = lambda: {"state": "idle", "loaded_resource": None,
+                                  "loaded_models_count": 0}
+            return m
+        mock_get.side_effect = side_effect
 
         resolution = router.resolve("chat")
         assert resolution.resource.name == "gpu-chat-model"

@@ -1,22 +1,17 @@
-# ModelPool Resource Registry
-# Each resource is a tested, benchmarked configuration.
-# What you tested is what runs.
-#
-# Tags define routing: each tag has a priority (lower = preferred).
-# The router resolves a tag to the highest-priority available resource.
-# Examples: tag "compression" -> pick resource with compression priority 1
-#           if that's unavailable -> fall back to priority 2, etc.
-
 resources:
-  # --- hwrouter managed resources ---
-
   qwen36-27b_mtp_reasoning_multi-gpu:
-    description: "Qwen3.6-27B MTP with reasoning ON, 131K ctx, both GPUs, 2 parallel slots for coding agents"
+    description: Qwen3.6-27B MTP with reasoning ON, 131K ctx, both GPUs, 2 parallel
+      slots for coding agents
     type: managed
     size_gb: 16
     ctx: 131072
-    capabilities: [chat, code, agentic, reasoning]
-    workers: [hwrouter]
+    capabilities:
+    - chat
+    - code
+    - agentic
+    - reasoning
+    workers:
+    - hwrouter
     tags:
       chat: 1
       agentic: 1
@@ -25,46 +20,75 @@ resources:
     benchmark:
       prompt_eval_tps: 727.8
       generation_tps: 33.8
-      tested_at: "2026-05-27"
+      tested_at: '2026-05-27'
     command:
       binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
       flags:
-        - [-m, "/AITOOLCHAIN/models/Qwen3.6-27B/Qwen3.6-27B-MTP-Q4_K_M.gguf"]
-        - [-c, "131072"]
-        - [-ngl, "99"]
-        - [-fa, "on"]
-        - [--cache-type-k, q4_0]
-        - [--cache-type-v, q4_0]
-        - [--reasoning, "on"]
-        - [--jinja]
-        - [--chat-template-kwargs, '{"preserve_thinking":true}']
-        - [--no-mmap]
-        - [--kv-unified]
-        - [--tensor-split, "0.5,0.5"]
-        - [--device, "ROCm0,ROCm1"]
-        - [--parallel, "2"]
-        - [--cont-batching]
-        - [--batch-size, "1024"]
-        - [--ubatch-size, "512"]
-        - [--port, "{inference_port}"]
-        - [--host, "0.0.0.0"]
-        - [--temp, "0.7"]
-        - [--top-p, "0.95"]
-        - [--top-k, "40"]
-        - [--min-p, "0.05"]
-        - [--presence-penalty, "0.0"]
-        - [--spec-type, draft-mtp]
-        - [--spec-draft-n-max, "3"]
-        - [--spec-draft-p-min, "0.75"]
-        - [--cache-ram, "16384"]
-
+      - - -m
+        - /AITOOLCHAIN/models/Qwen3.6-27B/Qwen3.6-27B-MTP-Q4_K_M.gguf
+      - - -c
+        - '131072'
+      - - -ngl
+        - '99'
+      - - -fa
+        - 'on'
+      - - --cache-type-k
+        - q4_0
+      - - --cache-type-v
+        - q4_0
+      - - --reasoning
+        - 'on'
+      - - --jinja
+      - - --chat-template-kwargs
+        - '{"preserve_thinking":true}'
+      - - --no-mmap
+      - - --kv-unified
+      - - --tensor-split
+        - 0.5,0.5
+      - - --device
+        - ROCm0,ROCm1
+      - - --parallel
+        - '2'
+      - - --cont-batching
+      - - --batch-size
+        - '1024'
+      - - --ubatch-size
+        - '512'
+      - - --port
+        - '{inference_port}'
+      - - --host
+        - 0.0.0.0
+      - - --temp
+        - '0.7'
+      - - --top-p
+        - '0.95'
+      - - --top-k
+        - '40'
+      - - --min-p
+        - '0.05'
+      - - --presence-penalty
+        - '0.0'
+      - - --spec-type
+        - draft-mtp
+      - - --spec-draft-n-max
+        - '3'
+      - - --spec-draft-p-min
+        - '0.75'
+      - - --cache-ram
+        - '16384'
+    generalist: true
   qwen36-35b-a3b_mtp_no-reasoning_multi-gpu:
-    description: "35B MoE (3B active), MTP speculative, reasoning OFF, 262K ctx, both GPUs. Best for context compression."
+    description: 35B MoE (3B active), MTP speculative, reasoning OFF, 262K ctx, both
+      GPUs. Best for context compression.
     type: managed
     size_gb: 21
     ctx: 262144
-    capabilities: [compression, summarize, chat]
-    workers: [hwrouter]
+    capabilities:
+    - compression
+    - summarize
+    - chat
+    workers:
+    - hwrouter
     tags:
       compression: 1
       title: 1
@@ -74,48 +98,75 @@ resources:
     benchmark:
       prompt_eval_tps: 2224.8
       generation_tps: 71.4
-      tested_at: "2026-05-27"
+      tested_at: '2026-05-27'
     command:
       binary: /AITOOLCHAIN/llama.cpp/build/bin/llama-server
       flags:
-        - [-m, "/AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf"]
-        - [-c, "262144"]
-        - [-ngl, "99"]
-        - [-fa, "on"]
-        - [--cache-type-k, q8_0]
-        - [--cache-type-v, q8_0]
-        - [--reasoning, "off"]
-        - [--jinja]
-        - [--chat-template-kwargs, '{"preserve_thinking":true}']
-        - [--no-mmap]
-        - [--kv-unified]
-        - [--tensor-split, "0.5,0.5"]
-        - [--device, "ROCm0,ROCm1"]
-        - [--parallel, "1"]
-        - [--cont-batching]
-        - [--batch-size, "1024"]
-        - [--ubatch-size, "512"]
-        - [--port, "{inference_port}"]
-        - [--host, "0.0.0.0"]
-        - [--temp, "0.7"]
-        - [--top-p, "0.95"]
-        - [--top-k, "40"]
-        - [--min-p, "0.05"]
-        - [--presence-penalty, "0.0"]
-        - [--spec-type, draft-mtp]
-        - [--spec-draft-n-max, "3"]
-        - [--spec-draft-p-min, "0.75"]
-        - [--cache-ram, "16384"]
-
-  # --- pvellm managed resources ---
-
+      - - -m
+        - /AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf
+      - - -c
+        - '262144'
+      - - -ngl
+        - '99'
+      - - -fa
+        - 'on'
+      - - --cache-type-k
+        - q8_0
+      - - --cache-type-v
+        - q8_0
+      - - --reasoning
+        - 'off'
+      - - --jinja
+      - - --chat-template-kwargs
+        - '{"preserve_thinking":true}'
+      - - --no-mmap
+      - - --kv-unified
+      - - --tensor-split
+        - 0.5,0.5
+      - - --device
+        - ROCm0,ROCm1
+      - - --parallel
+        - '1'
+      - - --cont-batching
+      - - --batch-size
+        - '1024'
+      - - --ubatch-size
+        - '512'
+      - - --port
+        - '{inference_port}'
+      - - --host
+        - 0.0.0.0
+      - - --temp
+        - '0.7'
+      - - --top-p
+        - '0.95'
+      - - --top-k
+        - '40'
+      - - --min-p
+        - '0.05'
+      - - --presence-penalty
+        - '0.0'
+      - - --spec-type
+        - draft-mtp
+      - - --spec-draft-n-max
+        - '3'
+      - - --spec-draft-p-min
+        - '0.75'
+      - - --cache-ram
+        - '16384'
   qwen36-35b-a3b_no-reasoning_cpu:
-    description: "35B MoE on CPU (9850X3D), ik_llama.cpp, reasoning off, 8 threads"
+    description: 35B MoE on CPU (9850X3D), ik_llama.cpp, reasoning off, 8 threads
     type: managed
     size_gb: 21
     ctx: 262144
-    capabilities: [title-gen, triage, summarize, code-review, chat]
-    workers: [pvellm]
+    capabilities:
+    - title-gen
+    - triage
+    - summarize
+    - code-review
+    - chat
+    workers:
+    - pvellm
     tags:
       compression: 2
       title: 2
@@ -125,54 +176,76 @@ resources:
     benchmark:
       prompt_eval_tps: 473.1
       generation_tps: 39.4
-      tested_at: "2026-05-27"
+      tested_at: '2026-05-27'
     command:
       binary: /AITOOLCHAIN/ik_llama.cpp/build/bin/llama-server
       flags:
-        - [-m, "/AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf"]
-        - [-c, "262144"]
-        - [-ngl, "0"]
-        - [-fa, "on"]
-        - [--cache-type-k, q8_0]
-        - [--cache-type-v, q8_0]
-        - [--reasoning, "off"]
-        - [--jinja]
-        - [--chat-template-kwargs, '{"preserve_thinking":true}']
-        - [--threads, "8"]
-        - [--parallel, "1"]
-        - [--batch-size, "2048"]
-        - [--ubatch-size, "256"]
-        - [--spec-stage, "mtp:n_max=3,p_min=0.75"]
-        - [--port, "{inference_port}"]
-        - [--host, "0.0.0.0"]
-        - [--temp, "0.7"]
-        - [--top-p, "0.95"]
-        - [--top-k, "40"]
-        - [--min-p, "0.05"]
-        - [--merge-up-gate-experts]
-        - [--cache-ram, "16384"]
-        - [--ctx-checkpoints, "256"]
-
-  # --- External cloud resources ---
-
+      - - -m
+        - /AITOOLCHAIN/models/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-MTP-Q4_K_M.gguf
+      - - -c
+        - '262144'
+      - - -ngl
+        - '0'
+      - - -fa
+        - 'on'
+      - - --cache-type-k
+        - q8_0
+      - - --cache-type-v
+        - q8_0
+      - - --reasoning
+        - 'off'
+      - - --jinja
+      - - --chat-template-kwargs
+        - '{"preserve_thinking":true}'
+      - - --threads
+        - '8'
+      - - --parallel
+        - '1'
+      - - --batch-size
+        - '2048'
+      - - --ubatch-size
+        - '256'
+      - - --spec-stage
+        - mtp:n_max=3,p_min=0.75
+      - - --port
+        - '{inference_port}'
+      - - --host
+        - 0.0.0.0
+      - - --temp
+        - '0.7'
+      - - --top-p
+        - '0.95'
+      - - --top-k
+        - '40'
+      - - --min-p
+        - '0.05'
+      - - --merge-up-gate-experts
+      - - --cache-ram
+        - '16384'
+      - - --ctx-checkpoints
+        - '256'
   grok-4.3_general:
-    description: "Grok 4.3 via xAI OAuth, 256K ctx, cloud"
+    description: Grok 4.3 via xAI OAuth, 256K ctx, cloud
     type: external
     endpoint: https://api.x.ai/v1
     auth:
       method: xai-oauth
     model: grok-4.3
     ctx: 256000
-    capabilities: [chat, compression, agentic, vision]
-    workers: [cloud-xai]
+    capabilities:
+    - chat
+    - compression
+    - agentic
+    - vision
+    workers:
+    - cloud-xai
     tags:
       chat: 4
       compression: 3
       agentic: 2
       vision: 1
-
   glm-45-flash_general:
-    description: "GLM-4.5-Flash free tier via Z.ai global API, 131K ctx"
+    description: GLM-4.5-Flash free tier via Z.ai global API, 131K ctx
     type: external
     endpoint: https://open.bigmodel.cn/api/paas/v4
     auth:
@@ -180,16 +253,18 @@ resources:
       env_var: LM_API_KEY
     model: glm-4.5-flash
     ctx: 131072
-    capabilities: [compression, summarize, triage, chat]
-    workers: [cloud-zai-free]
+    capabilities:
+    - compression
+    - summarize
+    - triage
+    - chat
+    workers:
+    - cloud-zai-free
     tags:
       compression: 4
       summarize: 3
       triage: 3
       chat: 5
-
-# --- Workers ---
-
 workers:
   hwrouter:
     host: 192.168.35.185
@@ -202,7 +277,6 @@ workers:
     drain_timeout: 30
     default_resource: qwen36-27b_mtp_reasoning_multi-gpu
     pool_secret: mp-secret-homelab
-
   pvellm:
     host: 192.168.35.17
     worker_port: 9100
@@ -214,9 +288,7 @@ workers:
     drain_timeout: 10
     default_resource: qwen36-35b-a3b_no-reasoning_cpu
     pool_secret: mp-secret-homelab
-
   cloud-xai:
     type: external
-
   cloud-zai-free:
     type: external
