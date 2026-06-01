@@ -130,7 +130,8 @@ class TestResolveWithWorkerStatus:
         """If the model is already loaded, no swap needed."""
         mock_get.return_value = MagicMock(
             status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gpu-chat-model"},
+            json=lambda: {"state": "ready", "loaded_resource": "gpu-chat-model",
+                          "loaded_models_count": 0},
         )
 
         resolution = router.resolve("chat")
@@ -158,7 +159,8 @@ class TestResolveWithWorkerStatus:
         """Worker has wrong model loaded -> needs swap."""
         mock_get.return_value = MagicMock(
             status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gpu-compress-model"},
+            json=lambda: {"state": "ready", "loaded_resource": "gpu-compress-model",
+                          "loaded_models_count": 0},
         )
 
         resolution = router.resolve("chat")
@@ -185,7 +187,8 @@ class TestResolveWithWorkerStatus:
         """Resolution should have fallback chain from lower-priority resources."""
         mock_get.return_value = MagicMock(
             status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gpu-chat-model"},
+            json=lambda: {"state": "ready", "loaded_resource": "gpu-chat-model",
+                          "loaded_models_count": 0},
         )
 
         resolution = router.resolve("chat")

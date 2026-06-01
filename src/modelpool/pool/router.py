@@ -136,12 +136,17 @@ class Router:
     def _resolve_managed(self, resource: Resource) -> Optional[Resolution]:
         """Resolve a managed resource to a worker.
 
-        Priority order:
-        1. Worker already has this resource loaded (no swap)
-        2. Worker is idle (cold start, clean)
-        3. Worker is ready with different resource (swap needed)
-        4. Worker is busy (skip)
+        Priority:
+        1. Any generalist resource that is already loaded with capacity
+        2. The requested resource is already loaded on a worker
+        3. Worker is idle (cold start)
+        4. Worker is ready for swap (only if under max_concurrent_models)
         """
+        # Step 1: Check for a loaded generalist with capacity
+        gen = self._find_loaded_generalist()
+        if gen:
+            return gen
+
         workers = self.registry.get_workers_for_resource(resource.name)
         if not workers:
             return None
@@ -158,6 +163,8 @@ class Router:
 
             state = status.get("state", "unknown")
             loaded = status.get("loaded_resource")
+            current_models = status.get("loaded_models_count", 1 if loaded else 0)
+            max_models = worker.max_concurrent_models
 
             # Best case: already loaded on this worker
             if state == "ready" and loaded == resource.name:
@@ -173,7 +180,15 @@ class Router:
                     currently_loaded=loaded,
                 )
 
-            # Good: worker is ready but has a different resource
+            # Skip workers at capacity (no swap allowed)
+            if state == "ready" and current_models >= max_models:
+                logger.debug(
+                    f"Worker '{worker.name}' at capacity "
+                    f"({current_models}/{max_models}), skipping"
+                )
+                continue
+
+            # Good: worker is ready but has a different resource (swap candidate)
             if state == "ready" and loaded and ready_for_swap is None:
                 ready_for_swap = (worker, loaded)
 
@@ -211,6 +226,40 @@ class Router:
             )
 
         # No workers available
+        return None
+
+    def _find_loaded_generalist(self) -> Optional[Resolution]:
+        """Find any generalist resource that is already loaded and has capacity.
+
+        Generalist resources can serve any tag when already loaded, avoiding
+        unnecessary swaps.
+        """
+        for res in self.registry.resources.values():
+            if not res.generalist or not res.is_managed:
+                continue
+            for wname in res.workers:
+                try:
+                    w = self.registry.get_worker(wname)
+                except Exception:
+                    continue
+                status = self._get_worker_status(w)
+                if status is None:
+                    continue
+                if (status.get("state") == "ready"
+                        and status.get("loaded_resource") == res.name):
+                    current = status.get("loaded_models_count", 1)
+                    if current < w.max_concurrent_models:
+                        logger.info(
+                            f"Using loaded generalist '{res.name}' on "
+                            f"'{w.name}' (capacity available)"
+                        )
+                        return Resolution(
+                            tag="",
+                            resource=res,
+                            worker=w,
+                            needs_swap=False,
+                            currently_loaded=res.name,
+                        )
         return None
 
     def _get_worker_status(self, worker: Worker) -> Optional[dict]:
