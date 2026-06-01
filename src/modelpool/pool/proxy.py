@@ -13,7 +13,6 @@ import time
 from typing import Optional
 
 import httpx
-import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -133,7 +132,8 @@ class PoolProxy:
         return JSONResponse({"object": "list", "data": models})
 
     async def _trigger_swap(self, resolution: Resolution) -> None:
-        """Trigger a model swap on the target worker."""
+        """Trigger a model swap on the target worker (async)."""
+        import asyncio
         route = resolution.route
         timeout = route.timeout if route else 120
 
@@ -142,20 +142,21 @@ class PoolProxy:
             f"{resolution.currently_loaded} -> {resolution.resource.name}"
         )
 
+        url = f"{resolution.worker_api_url}/worker/load"
         try:
-            resp = requests.post(
-                f"{resolution.worker_api_url}/worker/load",
-                json={"resource": resolution.resource.name},
-                timeout=timeout,
-            )
-            if resp.status_code not in (200, 202):
-                raise SwapError(
-                    f"Worker returned {resp.status_code}: {resp.text[:200]}"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
+                resp = await client.post(
+                    url,
+                    json={"resource": resolution.resource.name},
                 )
+                if resp.status_code not in (200, 202):
+                    raise SwapError(
+                        f"Worker returned {resp.status_code}: {resp.text[:200]}"
+                    )
             logger.info(f"Swap complete: {resolution.resource.name} loaded")
-        except requests.Timeout:
+        except httpx.TimeoutException:
             raise SwapError(f"Swap timed out after {timeout}s")
-        except requests.ConnectionError:
+        except httpx.ConnectError:
             raise SwapError(f"Worker unreachable during swap")
 
     async def _try_fallbacks(
@@ -179,35 +180,78 @@ class PoolProxy:
         self, target_url: str, headers: dict, body: bytes,
         resolution: Resolution, start_time: float,
     ) -> StreamingResponse:
-        """Proxy with SSE streaming passthrough."""
-        async with self._http_client.stream(
-            "POST", target_url, headers=headers, content=body,
-        ) as upstream:
-            status_code = upstream.status_code
-            if status_code != 200:
-                error_body = await upstream.aread()
-                logger.error(f"Upstream error {status_code}: {error_body[:200]}")
-                return JSONResponse(
-                    status_code=status_code,
-                    content={"error": f"Upstream returned {status_code}"},
-                )
+        """Proxy with SSE streaming passthrough.
 
-            content_type = upstream.headers.get("content-type", "text/event-stream")
+        Uses an asyncio.Queue to decouple the upstream read from the
+        downstream write, so the httpx stream context can stay alive
+        while Starlette iterates the generator.
+        """
+        import asyncio
 
-            async def generate():
-                async for chunk in upstream.aiter_bytes():
-                    yield chunk
-                elapsed = time.time() - start_time
-                logger.info(
-                    f"Stream completed: {resolution.resource.name} on "
-                    f"{resolution.worker.name} in {elapsed:.1f}s"
-                )
+        queue: asyncio.Queue = asyncio.Queue()
+        status_code_holder: list[int] = []
+        content_type_holder: list[str] = []
 
-            return StreamingResponse(
-                generate(),
-                media_type=content_type,
-                headers={"X-Accel-Buffering": "no"},
+        async def _read_upstream():
+            try:
+                async with self._http_client.stream(
+                    "POST", target_url, headers=headers, content=body,
+                ) as upstream:
+                    status_code_holder.append(upstream.status_code)
+                    content_type_holder.append(
+                        upstream.headers.get("content-type", "text/event-stream")
+                    )
+
+                    if upstream.status_code != 200:
+                        error_body = await upstream.aread()
+                        logger.error(f"Upstream error {upstream.status_code}: {error_body[:200]}")
+                        await queue.put(("error", upstream.status_code, error_body))
+                        return
+
+                    async for chunk in upstream.aiter_bytes():
+                        await queue.put(("data", chunk))
+            except Exception as e:
+                logger.error(f"Upstream stream error: {e}")
+                await queue.put(("error", 502, str(e).encode()))
+            finally:
+                await queue.put(None)  # sentinel
+
+        # Start upstream reader as background task
+        asyncio.create_task(_read_upstream())
+
+        # Wait for status code to arrive
+        # First item in queue tells us if it's data or error
+        first = await queue.get()
+        if first is None:
+            return JSONResponse(status_code=502, content={"error": "Upstream closed unexpectedly"})
+
+        if first[0] == "error":
+            return JSONResponse(status_code=first[1], content={"error": first[2][:200].decode(errors="replace")})
+
+        # It's data -- start streaming
+        first_chunk = first[1]
+        content_type = content_type_holder[0] if content_type_holder else "text/event-stream"
+
+        async def generate():
+            yield first_chunk
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if item[0] == "error":
+                    break
+                yield item[1]
+            elapsed = time.time() - start_time
+            logger.info(
+                f"Stream completed: {resolution.resource.name} on "
+                f"{resolution.worker.name} in {elapsed:.1f}s"
             )
+
+        return StreamingResponse(
+            generate(),
+            media_type=content_type,
+            headers={"X-Accel-Buffering": "no"},
+        )
 
     async def _proxy_sync(
         self, target_url: str, headers: dict, body: bytes,
