@@ -64,10 +64,27 @@ Hermes -> Pool Proxy (:9000) -> Worker Agent (:9100) -> llama-server (:8080)
                                    swaps models on demand
 ```
 
-1. **Define** resources in `resources.yaml` with tags and priorities
-2. **Deploy** worker agents on each inference host
-3. **Tag** resources by use case (compression, chat, code, etc.)
-4. **Pool proxy** resolves tags, handles swapping, fallback chains, idle timers
+Workers are **paired** with a single pool proxy using a shared secret (`pool_secret`). Management endpoints (load, unload, revert) require the secret -- preventing multiple pool proxies from fighting over the same GPU. Status and health endpoints stay open for monitoring.
+
+1. **Define** resources in `resources.yaml` with tags, priorities, and worker secrets
+2. **Deploy** worker agents on each inference host (each with `pool_secret`)
+3. **Deploy** one pool proxy per Hermes instance (reads secrets from registry)
+4. **Pool proxy** resolves tags, authenticates to workers, handles swapping
+
+### Worker Pairing
+
+```yaml
+# resources.yaml
+workers:
+  gpu-host:
+    host: 192.168.35.185
+    pool_secret: mp-secret-homelab   # shared secret with pool proxy
+```
+
+- Worker rejects management commands without the correct `X-Pool-Secret` header
+- Pool proxy reads the secret from the registry and sends it with every swap/load
+- `GET /worker/status` shows `paired: true/false`
+- One pool proxy per Hermes instance = no GPU fighting
 
 ## Quick Start
 

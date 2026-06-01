@@ -201,6 +201,7 @@ workers:
     swap_timeout: 120
     drain_timeout: 30
     default_resource: qwen36-27b_mtp_reasoning_multi-gpu
+    pool_secret: mp-secret-homelab
 
   pvellm:
     host: 192.168.35.17
@@ -212,6 +213,7 @@ workers:
     swap_timeout: 60
     drain_timeout: 10
     default_resource: qwen36-35b-a3b_no-reasoning_cpu
+    pool_secret: mp-secret-homelab
 
   cloud-xai:
     type: external

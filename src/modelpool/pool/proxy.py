@@ -158,11 +158,16 @@ class PoolProxy:
         )
 
         url = f"{resolution.worker_api_url}/worker/load"
+        headers = {}
+        if resolution.worker.pool_secret:
+            headers["X-Pool-Secret"] = resolution.worker.pool_secret
+
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
                 resp = await client.post(
                     url,
                     json={"resource": resolution.resource.name},
+                    headers=headers,
                 )
                 if resp.status_code not in (200, 202):
                     raise SwapError(

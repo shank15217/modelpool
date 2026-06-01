@@ -71,18 +71,22 @@ def main() -> None:
     inference_port = wconfig.get("inference_port", 8080)
     log_dir = wconfig.get("log_dir", "/var/log/modelpool")
     idle_shutdown = wconfig.get("idle_shutdown", 0)
+    pool_secret = wconfig.get("pool_secret")
 
-    # Get worker from registry for settings
+    # Get worker from registry for settings (including pool_secret)
     try:
         worker = registry.get_worker(worker_name)
         inference_port = worker.inference_port
+        # Registry secret takes precedence if set
+        if worker.pool_secret:
+            pool_secret = worker.pool_secret
     except Exception:
         pass  # Use config file values
 
     # Create manager, watchdog, configure app
     manager = LlamaServerManager(inference_port=inference_port, log_dir=log_dir)
     watchdog = Watchdog(manager, registry, worker_name)
-    configure(manager, registry, watchdog, worker_name, idle_shutdown=idle_shutdown)
+    configure(manager, registry, watchdog, worker_name, idle_shutdown=idle_shutdown, pool_secret=pool_secret)
 
     # Start idle -- don't load any model until the pool requests one
     if idle_shutdown > 0:

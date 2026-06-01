@@ -77,6 +77,7 @@ def valid_registry_yaml(tmp_path):
                 "vram_gb": 24,
                 "max_model_gb": 20,
                 "default_resource": "test-gpu-model",
+                "pool_secret": "test-secret-123",
             },
             "cloud-test": {
                 "type": "external",
@@ -196,6 +197,14 @@ class TestWorkerLookup:
         w = registry.get_worker("test-worker")
         assert w.worker_url == "http://192.168.1.100:9100"
         assert w.inference_url == "http://192.168.1.100:8080"
+
+    def test_worker_pool_secret(self, registry):
+        w = registry.get_worker("test-worker")
+        assert w.pool_secret == "test-secret-123"
+
+    def test_worker_no_secret(self, registry):
+        w = registry.get_worker("cloud-test")
+        assert w.pool_secret is None
 
     def test_external_worker(self, registry):
         w = registry.get_worker("cloud-test")

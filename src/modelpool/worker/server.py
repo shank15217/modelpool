@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from contextlib import asynccontextmanager
 
 import requests as sync_requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from modelpool.registry import Registry, RegistryError
@@ -16,6 +18,10 @@ from modelpool.worker.loader import LlamaServerManager, StateError, LoadError
 from modelpool.worker.watchdog import Watchdog
 
 logger = logging.getLogger("modelpool.worker.server")
+
+# Endpoints that require pool_secret authentication
+PROTECTED_ENDPOINTS = {"/worker/load", "/worker/unload", "/worker/revert"}
+SECRET_HEADER = "X-Pool-Secret"
 
 
 class LoadRequest(BaseModel):
@@ -29,6 +35,7 @@ _watchdog: Watchdog | None = None
 _worker_name: str | None = None
 _idle_shutdown: int = 0  # seconds, 0 = disabled
 _last_request_time: float = 0.0
+_pool_secret: str | None = None  # secret for pool-worker pairing
 
 
 @asynccontextmanager
@@ -58,14 +65,16 @@ def configure(
     watchdog: Watchdog,
     worker_name: str,
     idle_shutdown: int = 0,
+    pool_secret: str | None = None,
 ) -> None:
     """Configure the worker app with runtime dependencies."""
-    global _manager, _registry, _watchdog, _worker_name, _idle_shutdown
+    global _manager, _registry, _watchdog, _worker_name, _idle_shutdown, _pool_secret
     _manager = manager
     _registry = registry
     _watchdog = watchdog
     _worker_name = worker_name
     _idle_shutdown = idle_shutdown
+    _pool_secret = pool_secret
 
 
 def _touch_request_time():
@@ -122,13 +131,37 @@ async def _idle_shutdown_loop():
 app = FastAPI(title="ModelPool Worker", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def pool_auth_middleware(request: Request, call_next):
+    """Authenticate management requests using pool_secret.
+
+    Protected endpoints: /worker/load, /worker/unload, /worker/revert
+    Open endpoints: /worker/status, /worker/ready (monitoring)
+    Inference port (8080) is not handled by this server.
+    """
+    if request.url.path in PROTECTED_ENDPOINTS:
+        if _pool_secret:
+            provided = request.headers.get(SECRET_HEADER, "")
+            if provided != _pool_secret:
+                logger.warning(
+                    f"Unauthorized management request: {request.url.path} "
+                    f"from {request.client.host if request.client else 'unknown'}"
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "Invalid or missing pool secret"},
+                )
+    return await call_next(request)
+
+
 @app.get("/worker/status")
 async def worker_status():
-    """Current worker state, loaded resource, and slot info."""
+    """Current worker state, loaded resource, slot info, and pairing status."""
     if not _manager:
         raise HTTPException(500, "Worker not configured")
     status = _manager.get_status()
     status["idle_shutdown"] = _idle_shutdown if _idle_shutdown > 0 else None
+    status["paired"] = _pool_secret is not None
     return status
 
 

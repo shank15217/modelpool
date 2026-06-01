@@ -134,10 +134,14 @@ async def pool_swap(request: Request):
         )
 
     import requests as sync_requests
+    headers = {}
+    if worker.pool_secret:
+        headers["X-Pool-Secret"] = worker.pool_secret
     try:
         resp = sync_requests.post(
             f"{worker.worker_url}/worker/load",
             json={"resource": resource_name},
+            headers=headers,
             timeout=120,
         )
         return {"status": resp.json().get("status", "ok"), "worker": worker_name, "resource": resource_name}
@@ -163,9 +167,13 @@ async def pool_revert(request: Request):
         raise HTTPException(404, str(e))
 
     import requests as sync_requests
+    headers = {}
+    if worker.pool_secret:
+        headers["X-Pool-Secret"] = worker.pool_secret
     try:
         resp = sync_requests.post(
             f"{worker.worker_url}/worker/revert",
+            headers=headers,
             timeout=120,
         )
         return {"status": resp.json().get("status", "ok"), "worker": worker_name}

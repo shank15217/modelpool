@@ -66,6 +66,7 @@ class Worker:
     swap_timeout: int = 120
     drain_timeout: int = 30
     default_resource: Optional[str] = None
+    pool_secret: Optional[str] = None  # shared secret for pool-worker pairing
 
     @property
     def worker_url(self) -> str:
@@ -222,6 +223,7 @@ class Registry:
                 swap_timeout=wdef.get("swap_timeout", 120),
                 drain_timeout=wdef.get("drain_timeout", 30),
                 default_resource=wdef.get("default_resource"),
+                pool_secret=wdef.get("pool_secret"),
             )
             self._workers[name] = worker
 
