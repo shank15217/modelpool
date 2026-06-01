@@ -36,6 +36,7 @@ class Resource:
     ctx: int = 0
     capabilities: list[str] = field(default_factory=list)
     workers: list[str] = field(default_factory=list)
+    tags: dict[str, int] = field(default_factory=dict)  # tag -> priority (lower=better)
     benchmark: Benchmark = field(default_factory=Benchmark)
 
     # Managed resource fields
@@ -79,16 +80,6 @@ class Worker:
         return self.type == "managed"
 
 
-@dataclass
-class Route:
-    task_type: str
-    resource: str
-    fallback_resources: list[str] = field(default_factory=list)
-    timeout: int = 120
-    idle_revert: int = 300
-    swap_behavior: str = "queue"  # "queue" or "fallback"
-
-
 class Registry:
     """Loads and validates resources.yaml. Provides lookup methods."""
 
@@ -96,7 +87,6 @@ class Registry:
         self._raw = data
         self._resources: dict[str, Resource] = {}
         self._workers: dict[str, Worker] = {}
-        self._routes: dict[str, Route] = {}
 
         self._parse(data)
         self._validate()
@@ -110,7 +100,7 @@ class Registry:
         with open(path) as f:
             data = yaml.safe_load(f)
         if not data or not isinstance(data, dict):
-            data = {}  # Empty file is valid -- no resources, no workers, no routes
+            data = {}
         return cls(data)
 
     # --- Lookup methods ---
@@ -126,12 +116,6 @@ class Registry:
         if name not in self._workers:
             raise RegistryError(f"Worker not found: {name}")
         return self._workers[name]
-
-    def get_route(self, task_type: str) -> Route:
-        """Get a route by task type. Raises RegistryError if not found."""
-        if task_type not in self._routes:
-            raise RegistryError(f"No route defined for task type: {task_type}")
-        return self._routes[task_type]
 
     def get_default_resource(self, worker_name: str) -> Resource:
         """Get the default resource for a worker."""
@@ -149,6 +133,34 @@ class Registry:
         resource = self.get_resource(resource_name)
         return [self._workers[w] for w in resource.workers if w in self._workers]
 
+    def resolve_tag(self, tag: str) -> list[tuple[Resource, int]]:
+        """Get all resources with a given tag, sorted by priority (lowest first).
+
+        Returns list of (resource, priority) pairs.
+        """
+        matches = []
+        for resource in self._resources.values():
+            if tag in resource.tags:
+                matches.append((resource, resource.tags[tag]))
+        matches.sort(key=lambda x: x[1])
+        return matches
+
+    def all_tags(self) -> dict[str, list[tuple[str, int]]]:
+        """Get all unique tags and which resources have them.
+
+        Returns: {tag: [(resource_name, priority), ...]}
+        """
+        tags: dict[str, list[tuple[str, int]]] = {}
+        for resource in self._resources.values():
+            for tag, priority in resource.tags.items():
+                if tag not in tags:
+                    tags[tag] = []
+                tags[tag].append((resource.name, priority))
+        # Sort each tag's resources by priority
+        for tag in tags:
+            tags[tag].sort(key=lambda x: x[1])
+        return tags
+
     @property
     def resources(self) -> dict[str, Resource]:
         return self._resources
@@ -157,16 +169,11 @@ class Registry:
     def workers(self) -> dict[str, Worker]:
         return self._workers
 
-    @property
-    def routes(self) -> dict[str, Route]:
-        return self._routes
-
     # --- Parsing ---
 
     def _parse(self, data: dict) -> None:
         self._parse_resources(data.get("resources", {}))
         self._parse_workers(data.get("workers", {}))
-        self._parse_routing(data.get("routing", {}))
 
     def _parse_resources(self, raw: dict) -> None:
         for name, rdef in raw.items():
@@ -191,6 +198,7 @@ class Registry:
                 ctx=rdef.get("ctx", 0),
                 capabilities=rdef.get("capabilities", []),
                 workers=rdef.get("workers", []),
+                tags=rdef.get("tags", {}),
                 benchmark=benchmark,
                 binary=rdef.get("command", {}).get("binary"),
                 flags=rdef.get("command", {}).get("flags", []),
@@ -217,24 +225,6 @@ class Registry:
             )
             self._workers[name] = worker
 
-    def _parse_routing(self, raw: dict) -> None:
-        for task_type, rdef in raw.items():
-            # Collect fallback chain
-            fallbacks = []
-            for key in sorted(rdef.keys()):
-                if key.startswith("fallback_resource") and rdef[key] and rdef[key] != "none":
-                    fallbacks.append(rdef[key])
-
-            route = Route(
-                task_type=task_type,
-                resource=rdef["resource"],
-                fallback_resources=fallbacks,
-                timeout=rdef.get("timeout", 120),
-                idle_revert=rdef.get("idle_revert", 300),
-                swap_behavior=rdef.get("swap_behavior", "queue"),
-            )
-            self._routes[task_type] = route
-
     # --- Validation ---
 
     def _validate(self) -> None:
@@ -259,6 +249,13 @@ class Registry:
                 if wname not in self._workers:
                     errors.append(f"Resource '{name}': references unknown worker '{wname}'")
 
+            # Validate tags are positive integers
+            for tag, priority in res.tags.items():
+                if not isinstance(priority, int) or priority < 1:
+                    errors.append(
+                        f"Resource '{name}': tag '{tag}' priority must be a positive integer, got {priority}"
+                    )
+
         # Validate workers
         for name, worker in self._workers.items():
             if worker.is_managed and not worker.host:
@@ -280,18 +277,6 @@ class Registry:
                                 f"Resource '{name}' ({res.size_gb}GB) exceeds "
                                 f"worker '{wname}' capacity ({worker.max_model_gb}GB)"
                             )
-
-        # Validate routing
-        for task_type, route in self._routes.items():
-            if route.resource not in self._resources:
-                errors.append(
-                    f"Route '{task_type}': resource '{route.resource}' not found"
-                )
-            for fb in route.fallback_resources:
-                if fb not in self._resources:
-                    errors.append(
-                        f"Route '{task_type}': fallback resource '{fb}' not found"
-                    )
 
         if errors:
             raise RegistryError(

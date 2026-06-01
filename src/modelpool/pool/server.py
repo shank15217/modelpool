@@ -94,33 +94,19 @@ async def pool_status():
 
 @app.get("/pool/routing")
 async def pool_routing():
-    """Current routing table with fallback chains."""
+    """Current tag routing table with resource priorities."""
     if not _registry:
         raise HTTPException(500, "Pool not configured")
 
-    routes = {}
-    for task_type, route in _registry.routes.items():
-        chain = []
-        for fb_name in route.fallback_resources:
-            try:
-                fb = _registry.get_resource(fb_name)
-                chain.append({
-                    "resource": fb_name,
-                    "type": fb.type,
-                    "workers": fb.workers,
-                })
-            except RegistryError:
-                chain.append({"resource": fb_name, "error": "not found"})
+    all_tags = _registry.all_tags()
+    result = {}
+    for tag, candidates in all_tags.items():
+        result[tag] = [
+            {"resource": name, "priority": priority}
+            for name, priority in candidates
+        ]
 
-        routes[task_type] = {
-            "resource": route.resource,
-            "fallback_chain": chain,
-            "timeout": route.timeout,
-            "idle_revert": route.idle_revert,
-            "swap_behavior": route.swap_behavior,
-        }
-
-    return {"routing": routes}
+    return {"routing": result}
 
 
 @app.post("/pool/swap")

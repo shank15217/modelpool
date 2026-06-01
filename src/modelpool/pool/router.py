@@ -1,10 +1,10 @@
-"""Pool router - resolves task types to resources and workers.
+"""Pool router - resolves tags to resources and workers.
 
-The router is the brain of the pool. Given a task type, it:
-1. Looks up the route (primary resource + fallback chain)
-2. Finds the best worker that can serve the resource
-3. Checks if the resource is already loaded on any worker
-4. Returns a resolution plan (resource, worker, needs_swap, fallbacks)
+The router is the brain of the pool. Given a tag (e.g. "compression", "chat"),
+it:
+1. Finds all resources tagged with that tag, sorted by priority
+2. For each candidate, checks if a worker is available
+3. Returns the best resolution (resource + worker + swap status)
 """
 
 from __future__ import annotations
@@ -15,22 +15,21 @@ from typing import Optional
 
 import requests
 
-from modelpool.registry import Registry, Resource, Worker, Route
+from modelpool.registry import Registry, Resource, Worker
 
 logger = logging.getLogger("modelpool.pool.router")
 
 
 @dataclass
 class Resolution:
-    """The result of routing a task type to a concrete resource + worker."""
+    """The result of routing a tag to a concrete resource + worker."""
 
-    task_type: str
+    tag: str
     resource: Resource
     worker: Worker
     needs_swap: bool
-    currently_loaded: Optional[str] = None  # what's on the worker now
+    currently_loaded: Optional[str] = None
     fallback_chain: list[tuple[Resource, Worker]] = field(default_factory=list)
-    route: Optional[Route] = None
 
     @property
     def is_external(self) -> bool:
@@ -51,66 +50,74 @@ class Resolution:
 
 
 class Router:
-    """Routes task types to resources and workers."""
+    """Routes tags to resources and workers using priority-based resolution."""
 
     def __init__(self, registry: Registry, worker_timeout: float = 5.0):
         self.registry = registry
         self.worker_timeout = worker_timeout
 
     @property
-    def routes(self) -> dict:
-        """Access the routing table for model-name lookups."""
-        return self.registry.routes
+    def tags(self) -> dict:
+        """Access all known tags for model-name lookups."""
+        return self.registry.all_tags()
 
-    def resolve(self, task_type: str) -> Resolution:
-        """Resolve a task type to a resource + worker plan.
+    def resolve(self, tag: str) -> Resolution:
+        """Resolve a tag to a resource + worker plan.
 
         Strategy:
-        1. Look up the route for this task type
-        2. For the primary resource, find workers that can serve it
-        3. Check each worker: is the resource already loaded?
-        4. If already loaded -> use it (no swap needed)
-        5. If not loaded -> pick the best available worker (needs swap)
-        6. Build the fallback chain from route config
+        1. Get all resources with this tag, sorted by priority (lowest first)
+        2. For each candidate, try to find an available worker
+        3. First successful match wins (best priority that's available)
+        4. Build fallback chain from remaining candidates
         """
-        route = self.registry.get_route(task_type)
-        primary_resource = self.registry.get_resource(route.resource)
+        candidates = self.registry.resolve_tag(tag)
 
-        # Try primary resource
-        resolution = self._resolve_resource(primary_resource, route)
-        if resolution:
-            return resolution
+        if not candidates:
+            raise RoutingError(
+                f"No resources tagged '{tag}'. "
+                f"Available tags: {list(self.registry.all_tags().keys())}"
+            )
 
-        # Primary failed (no workers available) -> try fallbacks
-        logger.info(
-            f"Primary resource '{primary_resource.name}' unavailable for "
-            f"task '{task_type}', trying fallbacks"
-        )
-        for fb_name in route.fallback_resources:
-            fb_resource = self.registry.get_resource(fb_name)
-            resolution = self._resolve_resource(fb_resource, route)
-            if resolution:
-                resolution.route = route
-                return resolution
+        resolution = None
+        fallback_chain = []
 
-        # All resources failed
-        raise RoutingError(
-            f"No available resource for task type '{task_type}' "
-            f"(tried primary + {len(route.fallback_resources)} fallbacks)"
-        )
+        for resource, priority in candidates:
+            result = self._resolve_resource(resource)
+            if result is not None:
+                if resolution is None:
+                    # First match = primary resolution
+                    resolution = result
+                    logger.info(
+                        f"Tag '{tag}' -> resource '{resource.name}' "
+                        f"(priority {priority}) on worker '{result.worker.name}' "
+                        f"(swap={result.needs_swap})"
+                    )
+                else:
+                    # Additional matches = fallback chain
+                    fallback_chain.append((resource, result.worker))
+            else:
+                logger.debug(
+                    f"Tag '{tag}': resource '{resource.name}' (priority {priority}) "
+                    f"has no available workers"
+                )
 
-    def _resolve_resource(
-        self, resource: Resource, route: Route
-    ) -> Optional[Resolution]:
+        if resolution is None:
+            raise RoutingError(
+                f"No available workers for any resource tagged '{tag}' "
+                f"(tried {len(candidates)} candidates)"
+            )
+
+        resolution.tag = tag
+        resolution.fallback_chain = fallback_chain
+        return resolution
+
+    def _resolve_resource(self, resource: Resource) -> Optional[Resolution]:
         """Try to resolve a specific resource to a worker."""
         if resource.type == "external":
-            return self._resolve_external(resource, route)
+            return self._resolve_external(resource)
+        return self._resolve_managed(resource)
 
-        return self._resolve_managed(resource, route)
-
-    def _resolve_external(
-        self, resource: Resource, route: Route
-    ) -> Resolution:
+    def _resolve_external(self, resource: Resource) -> Resolution:
         """External resources always resolve -- no worker state to check."""
         workers = self.registry.get_workers_for_resource(resource.name)
         if not workers:
@@ -120,23 +127,20 @@ class Router:
         worker = workers[0]
 
         return Resolution(
-            task_type=route.task_type,
+            tag="",
             resource=resource,
             worker=worker,
             needs_swap=False,
-            route=route,
         )
 
-    def _resolve_managed(
-        self, resource: Resource, route: Route
-    ) -> Optional[Resolution]:
+    def _resolve_managed(self, resource: Resource) -> Optional[Resolution]:
         """Resolve a managed resource to a worker.
 
-        Checks each worker that can serve this resource:
-        1. If already loaded -> use immediately (no swap)
-        2. If worker is ready with something else -> candidate for swap
-        3. If worker is idle (no model loaded) -> candidate for cold load
-        4. If worker is busy (loading/draining) -> skip
+        Priority order:
+        1. Worker already has this resource loaded (no swap)
+        2. Worker is idle (cold start, clean)
+        3. Worker is ready with different resource (swap needed)
+        4. Worker is busy (skip)
         """
         workers = self.registry.get_workers_for_resource(resource.name)
         if not workers:
@@ -162,12 +166,11 @@ class Router:
                     f"worker '{worker.name}'"
                 )
                 return Resolution(
-                    task_type=route.task_type,
+                    tag="",
                     resource=resource,
                     worker=worker,
                     needs_swap=False,
                     currently_loaded=loaded,
-                    route=route,
                 )
 
             # Good: worker is ready but has a different resource
@@ -185,12 +188,11 @@ class Router:
                 f"worker '{idle_worker.name}'"
             )
             return Resolution(
-                task_type=route.task_type,
+                tag="",
                 resource=resource,
                 worker=idle_worker,
                 needs_swap=True,
                 currently_loaded=None,
-                route=route,
             )
 
         # Use a worker that's ready for a swap
@@ -201,40 +203,20 @@ class Router:
                 f"'{worker.name}' (currently: {currently_loaded})"
             )
             return Resolution(
-                task_type=route.task_type,
+                tag="",
                 resource=resource,
                 worker=worker,
                 needs_swap=True,
                 currently_loaded=currently_loaded,
-                route=route,
             )
 
         # No workers available
         return None
 
-    def build_fallback_chain(self, route: Route) -> list[tuple[Resource, Worker]]:
-        """Build the full fallback chain for a route.
-
-        Returns list of (resource, worker) pairs in priority order.
-        Only includes resources that have available workers.
-        """
-        chain = []
-        for fb_name in route.fallback_resources:
-            try:
-                resource = self.registry.get_resource(fb_name)
-                workers = self.registry.get_workers_for_resource(fb_name)
-                if workers:
-                    # For external resources, just use the first worker
-                    # For managed, we'll check availability at request time
-                    chain.append((resource, workers[0]))
-            except Exception as e:
-                logger.warning(f"Skipping fallback '{fb_name}': {e}")
-        return chain
-
     def _get_worker_status(self, worker: Worker) -> Optional[dict]:
         """Query a worker's status API. Returns None if unreachable."""
         if not worker.is_managed:
-            return {"state": "external"}  # virtual status for external workers
+            return {"state": "external"}
 
         try:
             resp = requests.get(
@@ -266,4 +248,4 @@ class Router:
 
 
 class RoutingError(Exception):
-    """Raised when routing fails for a task type."""
+    """Raised when routing fails for a tag."""

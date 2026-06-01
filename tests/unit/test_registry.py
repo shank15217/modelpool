@@ -1,24 +1,29 @@
-"""Unit tests for the resource registry."""
+"""Unit tests for the resource registry and tag routing."""
 
 import pytest
 import yaml
 from pathlib import Path
 
-from modelpool.registry import Registry, RegistryError, Resource, Worker, Route
+from modelpool.registry import Registry, RegistryError, Resource, Worker
 
 
 @pytest.fixture
 def valid_registry_yaml(tmp_path):
-    """Create a minimal valid resources.yaml."""
+    """Create a minimal valid resources.yaml with tags."""
     data = {
         "resources": {
-            "test-resource": {
+            "test-gpu-model": {
                 "type": "managed",
-                "description": "Test resource",
+                "description": "Test GPU resource",
                 "size_gb": 10,
                 "ctx": 131072,
-                "capabilities": ["chat"],
+                "capabilities": ["chat", "code"],
                 "workers": ["test-worker"],
+                "tags": {
+                    "chat": 1,
+                    "code": 1,
+                    "compression": 2,
+                },
                 "command": {
                     "binary": "/usr/bin/llama-server",
                     "flags": [
@@ -35,8 +40,32 @@ def valid_registry_yaml(tmp_path):
                 "auth": {"method": "api_key", "env_var": "TEST_KEY"},
                 "model": "test-model",
                 "ctx": 128000,
-                "capabilities": ["chat"],
+                "capabilities": ["chat", "vision"],
                 "workers": ["cloud-test"],
+                "tags": {
+                    "chat": 2,
+                    "vision": 1,
+                },
+            },
+            "test-cpu-model": {
+                "type": "managed",
+                "description": "Test CPU resource",
+                "size_gb": 10,
+                "ctx": 65536,
+                "capabilities": ["compression"],
+                "workers": ["test-worker"],
+                "tags": {
+                    "compression": 1,
+                    "title": 1,
+                },
+                "command": {
+                    "binary": "/usr/bin/llama-server",
+                    "flags": [
+                        ["-m", "/models/cpu-test.gguf"],
+                        ["-c", "65536"],
+                        ["--port", "{inference_port}"],
+                    ],
+                },
             },
         },
         "workers": {
@@ -47,19 +76,10 @@ def valid_registry_yaml(tmp_path):
                 "type": "managed",
                 "vram_gb": 24,
                 "max_model_gb": 20,
-                "default_resource": "test-resource",
+                "default_resource": "test-gpu-model",
             },
             "cloud-test": {
                 "type": "external",
-            },
-        },
-        "routing": {
-            "chat": {
-                "resource": "test-resource",
-                "fallback_resource": "test-external",
-                "timeout": 60,
-                "idle_revert": 300,
-                "swap_behavior": "fallback",
             },
         },
     }
@@ -77,9 +97,8 @@ def registry(valid_registry_yaml):
 class TestRegistryParsing:
     def test_load_from_file(self, valid_registry_yaml):
         reg = Registry.from_file(valid_registry_yaml)
-        assert len(reg.resources) == 2
+        assert len(reg.resources) == 3
         assert len(reg.workers) == 2
-        assert len(reg.routes) == 1
 
     def test_missing_file(self, tmp_path):
         with pytest.raises(RegistryError, match="not found"):
@@ -94,8 +113,8 @@ class TestRegistryParsing:
 
 class TestResourceLookup:
     def test_get_resource(self, registry):
-        r = registry.get_resource("test-resource")
-        assert r.name == "test-resource"
+        r = registry.get_resource("test-gpu-model")
+        assert r.name == "test-gpu-model"
         assert r.type == "managed"
         assert r.is_managed
         assert r.size_gb == 10
@@ -115,6 +134,52 @@ class TestResourceLookup:
         assert r.auth.method == "api_key"
         assert r.auth.env_var == "TEST_KEY"
         assert r.model == "test-model"
+
+
+class TestTagLookup:
+    def test_resolve_tag_returns_sorted_by_priority(self, registry):
+        """Resources tagged 'chat' should return sorted by priority."""
+        matches = registry.resolve_tag("chat")
+        assert len(matches) == 2
+        # Priority 1 first (test-gpu-model), then 2 (test-external)
+        assert matches[0][0].name == "test-gpu-model"
+        assert matches[0][1] == 1
+        assert matches[1][0].name == "test-external"
+        assert matches[1][1] == 2
+
+    def test_resolve_tag_single_match(self, registry):
+        matches = registry.resolve_tag("vision")
+        assert len(matches) == 1
+        assert matches[0][0].name == "test-external"
+        assert matches[0][1] == 1
+
+    def test_resolve_tag_unknown(self, registry):
+        matches = registry.resolve_tag("nonexistent-tag")
+        assert matches == []
+
+    def test_all_tags(self, registry):
+        tags = registry.all_tags()
+        assert "chat" in tags
+        assert "compression" in tags
+        assert "vision" in tags
+        assert "code" in tags
+        assert "title" in tags
+        # Chat should have 2 resources sorted by priority
+        assert len(tags["chat"]) == 2
+        assert tags["chat"][0] == ("test-gpu-model", 1)
+        assert tags["chat"][1] == ("test-external", 2)
+        # Compression should have 2 resources
+        assert len(tags["compression"]) == 2
+        assert tags["compression"][0] == ("test-cpu-model", 1)
+        assert tags["compression"][1] == ("test-gpu-model", 2)
+
+    def test_tags_on_resource(self, registry):
+        r = registry.get_resource("test-gpu-model")
+        assert r.tags == {"chat": 1, "code": 1, "compression": 2}
+
+    def test_external_resource_tags(self, registry):
+        r = registry.get_resource("test-external")
+        assert r.tags == {"chat": 2, "vision": 1}
 
 
 class TestWorkerLookup:
@@ -142,33 +207,20 @@ class TestWorkerLookup:
             registry.get_worker("nonexistent")
 
 
-class TestRouteLookup:
-    def test_get_route(self, registry):
-        route = registry.get_route("chat")
-        assert route.task_type == "chat"
-        assert route.resource == "test-resource"
-        assert route.fallback_resources == ["test-external"]
-        assert route.timeout == 60
-        assert route.idle_revert == 300
-        assert route.swap_behavior == "fallback"
-
-    def test_get_route_not_found(self, registry):
-        with pytest.raises(RegistryError, match="No route"):
-            registry.get_route("nonexistent")
-
-
 class TestAssociations:
     def test_get_default_resource(self, registry):
         r = registry.get_default_resource("test-worker")
-        assert r.name == "test-resource"
+        assert r.name == "test-gpu-model"
 
     def test_get_resources_for_worker(self, registry):
         resources = registry.get_resources_for_worker("test-worker")
-        assert len(resources) == 1
-        assert resources[0].name == "test-resource"
+        assert len(resources) == 2
+        names = {r.name for r in resources}
+        assert "test-gpu-model" in names
+        assert "test-cpu-model" in names
 
     def test_get_workers_for_resource(self, registry):
-        workers = registry.get_workers_for_resource("test-resource")
+        workers = registry.get_workers_for_resource("test-gpu-model")
         assert len(workers) == 1
         assert workers[0].name == "test-worker"
 
@@ -184,7 +236,6 @@ class TestValidation:
                 },
             },
             "workers": {},
-            "routing": {},
         }
         path = tmp_path / "resources.yaml"
         with open(path, "w") as f:
@@ -209,7 +260,6 @@ class TestValidation:
                     "max_model_gb": 20,
                 },
             },
-            "routing": {},
         }
         path = tmp_path / "resources.yaml"
         with open(path, "w") as f:
@@ -217,16 +267,64 @@ class TestValidation:
         with pytest.raises(RegistryError, match="exceeds"):
             Registry.from_file(path)
 
-    def test_route_references_missing_resource(self, tmp_path):
+    def test_invalid_tag_priority(self, tmp_path):
         data = {
-            "resources": {},
-            "workers": {},
-            "routing": {
-                "chat": {"resource": "nonexistent"},
+            "resources": {
+                "bad-tags": {
+                    "type": "managed",
+                    "workers": ["test-worker"],
+                    "tags": {"chat": 0},  # must be >= 1
+                    "command": {"binary": "/bin/test", "flags": []},
+                },
+            },
+            "workers": {
+                "test-worker": {"host": "localhost", "type": "managed"},
             },
         }
         path = tmp_path / "resources.yaml"
         with open(path, "w") as f:
             yaml.dump(data, f)
-        with pytest.raises(RegistryError, match="not found"):
+        with pytest.raises(RegistryError, match="positive integer"):
             Registry.from_file(path)
+
+    def test_tag_priority_must_be_integer(self, tmp_path):
+        data = {
+            "resources": {
+                "bad-tags": {
+                    "type": "managed",
+                    "workers": ["test-worker"],
+                    "tags": {"chat": "high"},  # must be int
+                    "command": {"binary": "/bin/test", "flags": []},
+                },
+            },
+            "workers": {
+                "test-worker": {"host": "localhost", "type": "managed"},
+            },
+        }
+        path = tmp_path / "resources.yaml"
+        with open(path, "w") as f:
+            yaml.dump(data, f)
+        with pytest.raises(RegistryError, match="positive integer"):
+            Registry.from_file(path)
+
+    def test_no_routes_section_required(self, tmp_path):
+        """resources.yaml without a routing section should be valid."""
+        data = {
+            "resources": {
+                "simple": {
+                    "type": "external",
+                    "endpoint": "https://api.test.com/v1",
+                    "workers": ["cloud"],
+                    "tags": {"chat": 1},
+                },
+            },
+            "workers": {
+                "cloud": {"type": "external"},
+            },
+        }
+        path = tmp_path / "resources.yaml"
+        with open(path, "w") as f:
+            yaml.dump(data, f)
+        reg = Registry.from_file(path)
+        assert len(reg.resources) == 1
+        assert reg.resolve_tag("chat")

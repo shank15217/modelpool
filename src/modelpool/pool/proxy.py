@@ -52,28 +52,28 @@ class PoolProxy:
 
         body_json = _safe_json(body)
 
-        # Determine task type: header > model field > default
-        task_type = request.headers.get("X-Task-Type")
-        if not task_type and body_json:
+        # Determine tag: header > model field > default
+        tag = request.headers.get("X-Task-Type")
+        if not tag and body_json:
             model_field = body_json.get("model", "")
-            # Check if the model field matches a known route
-            if model_field and model_field in self.router.routes:
-                task_type = model_field
-                logger.info(f"Model-name routing: '{model_field}' -> task type '{task_type}'")
-        if not task_type:
-            task_type = "chat"
+            # Check if the model field matches a known tag
+            if model_field and model_field in self.router.tags:
+                tag = model_field
+                logger.info(f"Model-name routing: '{model_field}' -> tag '{tag}'")
+        if not tag:
+            tag = "chat"
 
         # Route to resource + worker
         try:
-            resolution = self.router.resolve(task_type)
+            resolution = self.router.resolve(tag)
         except RoutingError as e:
-            logger.error(f"Routing failed for task '{task_type}': {e}")
+            logger.error(f"Routing failed for task '{tag}': {e}")
             raise HTTPException(503, str(e))
         except RegistryError as e:
             raise HTTPException(404, str(e))
 
         logger.info(
-            f"Task '{task_type}' -> resource '{resolution.resource.name}' "
+            f"Task '{tag}' -> resource '{resolution.resource.name}' "
             f"on worker '{resolution.worker.name}' "
             f"(swap={resolution.needs_swap}, external={resolution.is_external})"
         )
@@ -84,7 +84,7 @@ class PoolProxy:
                 await self._trigger_swap(resolution)
             except SwapError as e:
                 logger.warning(f"Swap failed: {e}, trying fallbacks")
-                resolution = await self._try_fallbacks(task_type, resolution)
+                resolution = await self._try_fallbacks(tag, resolution)
                 if resolution is None:
                     raise HTTPException(503, f"Swap failed and no fallbacks available: {e}")
 
@@ -150,8 +150,7 @@ class PoolProxy:
     async def _trigger_swap(self, resolution: Resolution) -> None:
         """Trigger a model swap on the target worker (async)."""
         import asyncio
-        route = resolution.route
-        timeout = route.timeout if route else 120
+        timeout = 120  # default swap timeout
 
         logger.info(
             f"Triggering swap on '{resolution.worker.name}': "
@@ -176,20 +175,18 @@ class PoolProxy:
             raise SwapError(f"Worker unreachable during swap")
 
     async def _try_fallbacks(
-        self, task_type: str, failed_resolution: Resolution
+        self, tag: str, failed_resolution: Resolution
     ) -> Optional[Resolution]:
-        """Try fallback resources when the primary fails."""
-        route = self.registry.get_route(task_type)
-        for fb_name in route.fallback_resources:
+        """Try fallback resources from the resolution's fallback chain."""
+        for fb_resource, fb_worker in failed_resolution.fallback_chain:
             try:
-                fb_resource = self.registry.get_resource(fb_name)
-                fb_resolution = self.router._resolve_resource(fb_resource, route)
+                fb_resolution = self.router._resolve_resource(fb_resource)
                 if fb_resolution:
-                    logger.info(f"Fallback: using '{fb_name}' instead")
-                    fb_resolution.route = route
+                    logger.info(f"Fallback: using '{fb_resource.name}' instead")
+                    fb_resolution.tag = tag
                     return fb_resolution
             except Exception as e:
-                logger.warning(f"Fallback '{fb_name}' failed: {e}")
+                logger.warning(f"Fallback '{fb_resource.name}' failed: {e}")
         return None
 
     async def _proxy_stream(
@@ -310,14 +307,13 @@ class PoolProxy:
         return headers
 
     def _reset_idle_timer(self, resolution: Resolution) -> None:
-        """Reset the idle timer for the worker after a successful request."""
-        route = resolution.route
-        if route and route.idle_revert > 0:
-            expires_at = time.time() + route.idle_revert
-            self._idle_timers[resolution.worker.name] = (
-                resolution.resource.name,
-                expires_at,
-            )
+        """Reset the idle timer for the worker after a successful request.
+
+        Uses the worker's idle_shutdown setting. The worker manages its own
+        idle timeout, so the pool proxy idle timer is just for revert-to-default
+        behavior (disabled for now -- let the worker handle it).
+        """
+        pass
 
     def get_idle_timers(self) -> dict:
         """Get current idle timer state."""

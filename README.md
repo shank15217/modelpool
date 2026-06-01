@@ -2,33 +2,61 @@
 
 On-demand LLM resource orchestration for homelab GPU clusters.
 
-A **resource** is a fully configured model recipe -- the GGUF weights file plus every llama-server launch flag, tuned for specific hardware and a specific use case. ModelPool routes tasks to the right resource and swaps models in and out of GPU memory as needed.
+A **resource** is a fully configured model recipe -- the GGUF weights file plus every llama-server launch flag, tuned for specific hardware and a specific use case. ModelPool routes tasks to the right resource using **tag-based priority routing** and swaps models in and out of GPU memory as needed.
+
+## How Routing Works
+
+Resources are tagged with priority levels. Lower number = preferred.
+
+```yaml
+resources:
+  gpu-27b:
+    tags:
+      chat: 1       # best for chat
+      agentic: 1    # best for agents
+      compression: 3 # can do compression but not preferred
+
+  gpu-35b:
+    tags:
+      compression: 1 # best for compression
+      title: 1       # best for titles
+      chat: 2         # decent for chat (fallback)
+```
+
+Router resolves a tag by sorting resources by priority, picking the first available. No separate routing table needed -- just tag your resources.
+
+```
+Hermes sends model: "compression" -> pool looks up tag "compression"
+  -> gpu-35b (priority 1) -> worker available -> done
+  -> if gpu-35b busy -> cpu-35b (priority 2) -> fallback
+  -> if cpu busy -> cloud-glm (priority 3) -> last resort
+```
 
 ## Current Resources
 
 ### hwrouter (2x RX 9070 XT, 32GB VRAM, ROCm)
 
-| Resource | Model | Ctx | Speed (prompt/gen) | Best For |
+| Resource | Model | Ctx | Speed (prompt/gen) | Tags (priority) |
 |---|---|---|---|---|
-| `qwen36-27b_mtp_reasoning_multi-gpu` | 27B MTP Q4_K_M, reasoning ON | 131K | 728 / 33.8 t/s | Coding agents, agentic work (default) |
-| `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | 35B MoE (3B active), reasoning OFF | 262K | 2,225 / 71.4 t/s | Context compression |
+| `qwen36-27b_mtp_reasoning_multi-gpu` | 27B MTP Q4_K_M, reasoning ON | 131K | 728 / 33.8 t/s | chat:1, agentic:1, code:1 |
+| `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | 35B MoE (3B active), reasoning OFF | 262K | 2,225 / 71.4 t/s | compression:1, title:1, summarize:1 |
 
 Swap time between resources: ~8 seconds.
 
 ### pvellm (AMD 9850X3D, 48GB RAM, ik_llama.cpp)
 
-| Resource | Model | Ctx | Speed (prompt/gen) | Best For |
+| Resource | Model | Ctx | Speed (prompt/gen) | Tags (priority) |
 |---|---|---|---|---|
-| `qwen36-35b-a3b_no-reasoning_cpu` | 35B MoE (3B active), reasoning OFF | 262K | 473 / 39.4 t/s | Title gen, triage, summarize (always on) |
+| `qwen36-35b-a3b_no-reasoning_cpu` | 35B MoE (3B active), reasoning OFF | 262K | 473 / 39.4 t/s | compression:2, title:2, triage:2 |
 
 ### Cloud (External)
 
-| Resource | Provider | Ctx | Auth | Best For |
+| Resource | Provider | Ctx | Auth | Tags (priority) |
 |---|---|---|---|---|
-| `grok-4.3_general` | xAI | 256K | OAuth | General fallback |
-| `glm-45-flash_general` | Z.ai | 131K | API key (free) | Triage, summarize |
+| `grok-4.3_general` | xAI | 256K | OAuth | chat:4, compression:3, agentic:2, vision:1 |
+| `glm-45-flash_general` | Z.ai | 131K | API key (free) | compression:4, summarize:3, triage:3, chat:5 |
 
-## How It Works
+## Architecture
 
 ```
 Hermes -> Pool Proxy (:9000) -> Worker Agent (:9100) -> llama-server (:8080)
@@ -36,10 +64,10 @@ Hermes -> Pool Proxy (:9000) -> Worker Agent (:9100) -> llama-server (:8080)
                                    swaps models on demand
 ```
 
-1. **Define** resources in `resources.yaml` with the exact tested command
+1. **Define** resources in `resources.yaml` with tags and priorities
 2. **Deploy** worker agents on each inference host
-3. **Route** task types (compression, chat, code) to resources
-4. **Pool proxy** handles routing, swapping, fallback chains, idle timers
+3. **Tag** resources by use case (compression, chat, code, etc.)
+4. **Pool proxy** resolves tags, handles swapping, fallback chains, idle timers
 
 ## Quick Start
 
@@ -50,24 +78,60 @@ pip install -e ".[dev]"
 # Start worker (manages llama-server on this host)
 modelpool-worker --config worker.yaml --registry resources.yaml
 
-# Load a specific resource
-curl -X POST localhost:9100/worker/load -d '{"resource":"qwen36-35b-a3b_mtp_no-reasoning_multi-gpu"}'
+# Start pool proxy (routes by tags)
+modelpool-pool --registry resources.yaml --port 9000
 
-# Check status
-curl localhost:9100/worker/status
+# Send a chat request (routed by tag "chat")
+curl http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"chat","messages":[{"role":"user","content":"Hello"}]}'
+
+# Send a compression request (routed by tag "compression")
+curl http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"compression","messages":[{"role":"user","content":"Compress this text..."}]}'
+```
+
+## Hermes Integration
+
+Configure Hermes to use the pool proxy as a provider:
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: chat                  # maps to tag "chat" in pool
+  provider: custom:modelpool
+
+providers:
+  modelpool:
+    base_url: http://localhost:9000/v1
+    api_key: no-key-required
+
+auxiliary:
+  compression:
+    provider: custom:modelpool
+    model: compression            # maps to tag "compression" in pool
+  title_generation:
+    provider: custom:modelpool
+    model: compression
+```
+
+Hermes sends `model: chat` or `model: compression` -> pool resolves the tag -> picks the best available resource. Hermes never knows about specific model names or workers.
+
+## Worker Management
+
+```bash
+# Status
+curl http://localhost:9100/worker/status
+
+# Load a resource (swaps model)
+curl -X POST localhost:9100/worker/load -d '{"resource":"qwen36-35b-a3b_mtp_no-reasoning_multi-gpu"}'
 
 # Revert to default
 curl -X POST localhost:9100/worker/revert
+
+# Unload (free GPU/CPU memory)
+curl -X POST localhost:9100/worker/unload
 ```
 
-## Documentation
-
-- [Architecture](docs/ARCHITECTURE.md) -- full design document
-- [Implementation Tasks](docs/TASKS.md) -- development roadmap
-
-## Status
-
-- [x] Phase 1: Worker Agent (deployed on hwrouter)
-- [ ] Phase 2: Pool Proxy (routing, streaming, idle timers)
-- [ ] Phase 3: Polish (metrics, error handling)
-- [ ] Phase 4: Benchmarking & Hermes integration
+Workers start idle (no model loaded) when `idle_shutdown > 0` is configured. Models load on demand, unload after 15 minutes of inactivity.
