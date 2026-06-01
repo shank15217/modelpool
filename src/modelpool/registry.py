@@ -203,6 +203,7 @@ class Registry:
                 workers=rdef.get("workers", []),
                 tags=rdef.get("tags", {}),
                 benchmark=benchmark,
+                generalist=rdef.get("generalist", False),
                 binary=rdef.get("command", {}).get("binary"),
                 flags=rdef.get("command", {}).get("flags", []),
                 endpoint=rdef.get("endpoint"),

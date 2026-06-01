@@ -337,3 +337,50 @@ class TestValidation:
         reg = Registry.from_file(path)
         assert len(reg.resources) == 1
         assert reg.resolve_tag("chat")
+
+
+class TestNewFields:
+    """Tests for generalist and max_concurrent_models fields."""
+
+    def test_resource_generalist_defaults_false(self, registry):
+        """Resources without generalist flag should default to False."""
+        for res in registry.resources.values():
+            assert hasattr(res, "generalist")
+            # In our test data none are marked generalist yet
+            assert res.generalist is False
+
+    def test_worker_max_concurrent_models_default(self, registry):
+        """Workers should have max_concurrent_models with default 1."""
+        for worker in registry.workers.values():
+            assert hasattr(worker, "max_concurrent_models")
+            assert worker.max_concurrent_models >= 1
+
+    def test_generalist_can_be_set_true(self, tmp_path):
+        """A resource can be marked as generalist."""
+        data = {
+            "resources": {
+                "gen-model": {
+                    "type": "managed",
+                    "size_gb": 16,
+                    "ctx": 131072,
+                    "workers": ["gpu-worker"],
+                    "tags": {"chat": 1},
+                    "generalist": True,
+                    "command": {"binary": "/bin/test", "flags": [["-m", "test.gguf"]]},
+                }
+            },
+            "workers": {
+                "gpu-worker": {
+                    "host": "127.0.0.1",
+                    "max_concurrent_models": 2,
+                }
+            },
+        }
+        path = tmp_path / "resources.yaml"
+        with open(path, "w") as f:
+            yaml.dump(data, f)
+        reg = Registry.from_file(path)
+        res = reg.resources["gen-model"]
+        assert res.generalist is True
+        w = reg.workers["gpu-worker"]
+        assert w.max_concurrent_models == 2
