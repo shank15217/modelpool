@@ -35,17 +35,33 @@ class PoolProxy:
         self._idle_timers: dict[str, tuple[str, float]] = {}
 
     async def handle_chat_completions(self, request: Request) -> StreamingResponse | JSONResponse:
-        """Handle /v1/chat/completions with task routing."""
-        start_time = time.time()
+        """Handle /v1/chat/completions with task routing.
 
-        # Read task type from header (default: "chat")
-        task_type = request.headers.get("X-Task-Type", "chat")
+        Routing priority:
+        1. X-Task-Type header (explicit, e.g. "compression")
+        2. model field in request body (e.g. "compression" -> looks up routing table)
+        3. Default "chat"
+        """
+        start_time = time.time()
 
         # Read request body
         try:
             body = await request.body()
         except Exception as e:
             raise HTTPException(400, f"Failed to read request body: {e}")
+
+        body_json = _safe_json(body)
+
+        # Determine task type: header > model field > default
+        task_type = request.headers.get("X-Task-Type")
+        if not task_type and body_json:
+            model_field = body_json.get("model", "")
+            # Check if the model field matches a known route
+            if model_field and model_field in self.router.routes:
+                task_type = model_field
+                logger.info(f"Model-name routing: '{model_field}' -> task type '{task_type}'")
+        if not task_type:
+            task_type = "chat"
 
         # Route to resource + worker
         try:

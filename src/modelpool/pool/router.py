@@ -57,6 +57,11 @@ class Router:
         self.registry = registry
         self.worker_timeout = worker_timeout
 
+    @property
+    def routes(self) -> dict:
+        """Access the routing table for model-name lookups."""
+        return self.registry.routes
+
     def resolve(self, task_type: str) -> Resolution:
         """Resolve a task type to a resource + worker plan.
 
