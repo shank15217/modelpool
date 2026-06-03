@@ -3,7 +3,7 @@
 import pytest
 import yaml
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from modelpool.registry import Registry
 from modelpool.pool.router import Router, Resolution, RoutingError
@@ -110,9 +110,10 @@ class TestTagResolution:
         assert len(matches) == 1
         assert matches[0][0].name == "cloud-model"
 
-    def test_resolve_unknown_tag_raises(self, router):
+    @pytest.mark.asyncio
+    async def test_resolve_unknown_tag_raises(self, router):
         with pytest.raises(RoutingError, match="No resources tagged"):
-            router.resolve("nonexistent-tag")
+            await router.resolve("nonexistent-tag")
 
     def test_all_tags(self, router):
         tags = router.tags
@@ -125,98 +126,103 @@ class TestTagResolution:
 
 
 class TestResolveWithWorkerStatus:
-    @patch("modelpool.pool.router.requests.get")
-    def test_resolve_with_resource_already_loaded(self, mock_get, router):
-        """If the model is already loaded, no swap needed."""
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gpu-chat-model",
-                          "loaded_models_count": 0},
-        )
 
-        resolution = router.resolve("chat")
+    async def _mock_status_fn(self, status_map, default=None):
+        """Return an async function that returns status dicts per worker name."""
+        _map = status_map
+        _default = default
+
+        async def _fn(worker):
+            if worker.name in _map:
+                return _map[worker.name]
+            return _default
+        return _fn
+
+    @pytest.mark.asyncio
+    async def test_resolve_with_resource_already_loaded(self, router):
+        """If the model is already loaded, no swap needed."""
+        async def mock_status(worker):
+            return {"state": "ready", "loaded_resource": "gpu-chat-model",
+                    "loaded_models_count": 0}
+
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            resolution = await router.resolve("chat")
         assert resolution.resource.name == "gpu-chat-model"
         assert resolution.worker.name == "gpu-worker"
         assert resolution.needs_swap is False
         assert resolution.currently_loaded == "gpu-chat-model"
 
-    @patch("modelpool.pool.router.requests.get")
-    def test_resolve_idle_worker_cold_load(self, mock_get, router):
+    @pytest.mark.asyncio
+    async def test_resolve_idle_worker_cold_load(self, router):
         """Idle worker gets cold load."""
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "idle", "loaded_resource": None},
-        )
+        async def mock_status(worker):
+            return {"state": "idle", "loaded_resource": None}
 
-        resolution = router.resolve("chat")
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            resolution = await router.resolve("chat")
         assert resolution.resource.name == "gpu-chat-model"
         assert resolution.worker.name == "gpu-worker"
         assert resolution.needs_swap is True
         assert resolution.currently_loaded is None
 
-    @patch("modelpool.pool.router.requests.get")
-    def test_resolve_swap_needed(self, mock_get, router):
+    @pytest.mark.asyncio
+    async def test_resolve_swap_needed(self, router):
         """Worker has wrong model loaded -> needs swap."""
-        def side_effect(url, **kwargs):
-            m = MagicMock(status_code=200)
-            if "192.168.1.100" in url:
-                m.json = lambda: {"state": "ready", "loaded_resource": "gpu-compress-model",
-                                  "loaded_models_count": 1}
-            else:
-                m.json = lambda: {"state": "idle", "loaded_resource": None,
-                                  "loaded_models_count": 0}
-            return m
-        mock_get.side_effect = side_effect
+        async def mock_status(worker):
+            if worker.name == "gpu-worker":
+                return {"state": "ready", "loaded_resource": "gpu-compress-model",
+                        "loaded_models_count": 1}
+            return {"state": "idle", "loaded_resource": None,
+                    "loaded_models_count": 0}
 
-        resolution = router.resolve("chat")
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            resolution = await router.resolve("chat")
         assert resolution.resource.name == "gpu-chat-model"
         assert resolution.worker.name == "gpu-worker"
         assert resolution.needs_swap is True
         assert resolution.currently_loaded == "gpu-compress-model"
 
-    @patch("modelpool.pool.router.requests.get")
-    def test_fallback_to_cloud_when_worker_unreachable(self, mock_get, router):
+    @pytest.mark.asyncio
+    async def test_fallback_to_cloud_when_worker_unreachable(self, router):
         """Worker unreachable -> falls back to cloud."""
-        mock_get.return_value = MagicMock(
-            status_code=None,
-            raise_exception=Exception("Connection refused"),
-        )
+        async def mock_status(worker):
+            return None  # unreachable
 
-        resolution = router.resolve("chat")
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            resolution = await router.resolve("chat")
         assert resolution.resource.name == "cloud-model"
         assert resolution.is_external
         assert resolution.needs_swap is False
 
-    @patch("modelpool.pool.router.requests.get")
-    def test_fallback_chain_populated(self, mock_get, router):
+    @pytest.mark.asyncio
+    async def test_fallback_chain_populated(self, router):
         """Resolution should have fallback chain from lower-priority resources."""
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gpu-chat-model",
-                          "loaded_models_count": 0},
-        )
+        async def mock_status(worker):
+            return {"state": "ready", "loaded_resource": "gpu-chat-model",
+                    "loaded_models_count": 0}
 
-        resolution = router.resolve("chat")
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            resolution = await router.resolve("chat")
         # Should have fallback chain from priority 2 and 3
         assert len(resolution.fallback_chain) >= 1
 
 
 class TestResolutionProperties:
-    @patch("modelpool.pool.router.requests.get")
-    def test_managed_resolution(self, mock_get, router):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "idle", "loaded_resource": None},
-        )
+    @pytest.mark.asyncio
+    async def test_managed_resolution(self, router):
+        async def mock_status(worker):
+            return {"state": "idle", "loaded_resource": None}
 
-        resolution = router.resolve("chat")
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            resolution = await router.resolve("chat")
         assert not resolution.is_external
         assert resolution.inference_url == "http://192.168.1.100:8080"
         assert resolution.worker_api_url == "http://192.168.1.100:9100"
 
-    def test_external_resolution(self, router):
+    @pytest.mark.asyncio
+    async def test_external_resolution(self, router):
         # External doesn't query worker status
-        resolution = router.resolve("vision")
+        resolution = await router.resolve("vision")
         assert resolution.is_external
         assert resolution.inference_url == "https://api.cloud.com/v1"
         assert resolution.worker.name == "cloud-worker"

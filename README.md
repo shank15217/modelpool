@@ -192,9 +192,12 @@ pytest tests/unit/test_pool_routing.py -v
 python tests/bench/bench_resource.py --endpoint http://localhost:9000/v1
 ```
 
-76 tests covering:
+200 tests covering:
 - Registry parsing, validation, lookups
-- Router tag resolution with mocked worker status
+- Async router tag resolution with cached worker status
 - Generalist preference, capacity enforcement, fallback behavior
-- Worker auth middleware (timing-safe comparison, path normalization)
+- Worker subprocess lifecycle (state machine, command building, drain/stop/start)
+- Worker watchdog (health checks, auto-recovery)
+- Pool proxy (auth injection, swap triggering, streaming, fallbacks)
+- Worker + pool server endpoints and middleware
 - Code review regression tests (secret headers, double parse, async threading)

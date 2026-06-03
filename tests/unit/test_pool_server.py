@@ -97,23 +97,22 @@ class TestPoolRouting:
 class TestPoolStatus:
     """Tests for /pool/status endpoint."""
 
-    @patch("modelpool.pool.router.requests.get")
-    def test_status_returns_workers(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "idle", "loaded_resource": None},
-        )
+    @pytest.mark.asyncio
+    async def test_status_returns_workers(self):
+        async def mock_status(worker):
+            return {"state": "idle", "loaded_resource": None}
 
-        reg, router, proxy = setup_pool()
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            reg, router, proxy = setup_pool()
 
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
-        resp = client.get("/pool/status")
-        assert resp.status_code == 200
+            from starlette.testclient import TestClient as TC
+            client = TC(pool_server.app)
+            resp = client.get("/pool/status")
+            assert resp.status_code == 200
 
-        data = resp.json()
-        assert "workers" in data
-        assert "hwrouter" in data["workers"]
+            data = resp.json()
+            assert "workers" in data
+            assert "hwrouter" in data["workers"]
 
 
 class TestPoolSwap:

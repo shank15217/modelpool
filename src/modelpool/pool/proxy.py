@@ -56,16 +56,15 @@ class PoolProxy:
         tag = request.headers.get("X-Task-Type")
         if not tag and body_json:
             model_field = body_json.get("model", "")
-            # Check if the model field matches a known tag
             if model_field and model_field in self.router.tags:
                 tag = model_field
                 logger.info(f"Model-name routing: '{model_field}' -> tag '{tag}'")
         if not tag:
             tag = "chat"
 
-        # Route to resource + worker
+        # Route to resource + worker (now async)
         try:
-            resolution = self.router.resolve(tag)
+            resolution = await self.router.resolve(tag)
         except RoutingError as e:
             logger.error(f"Routing failed for task '{tag}': {e}")
             raise HTTPException(503, str(e))
@@ -92,11 +91,15 @@ class PoolProxy:
         if not resolution.is_external:
             self._reset_idle_timer(resolution)
 
+        # Invalidate status cache for this worker (swap may have changed state)
+        if resolution.needs_swap:
+            self.router.invalidate_status_cache(resolution.worker.name)
+
         # Proxy the request
         target_url = f"{resolution.inference_url}/v1/chat/completions"
         headers = self._build_proxy_headers(request, resolution)
 
-        # Check if streaming (body_json already parsed above)
+        # Check if streaming
         stream = body_json.get("stream", False) if body_json else False
 
         try:
@@ -114,7 +117,7 @@ class PoolProxy:
     async def handle_models(self, request: Request) -> JSONResponse:
         """Handle /v1/models - aggregate loaded models across workers."""
         models = []
-        statuses = self.router.get_all_worker_statuses()
+        statuses = await self.router.get_all_worker_statuses()
 
         for worker_name, status in statuses.items():
             if status.get("state") == "ready" and status.get("loaded_resource"):
@@ -148,7 +151,6 @@ class PoolProxy:
 
     async def _trigger_swap(self, resolution: Resolution) -> None:
         """Trigger a model swap on the target worker (async)."""
-        import asyncio
         timeout = 120  # default swap timeout
 
         logger.info(
@@ -184,7 +186,7 @@ class PoolProxy:
         """Try fallback resources from the resolution's fallback chain."""
         for fb_resource, fb_worker in failed_resolution.fallback_chain:
             try:
-                fb_resolution = self.router._resolve_resource(fb_resource)
+                fb_resolution = await self.router._resolve_resource(fb_resource)
                 if fb_resolution:
                     logger.info(f"Fallback: using '{fb_resource.name}' instead")
                     fb_resolution.tag = tag
@@ -197,12 +199,7 @@ class PoolProxy:
         self, target_url: str, headers: dict, body: bytes,
         resolution: Resolution, start_time: float,
     ) -> StreamingResponse:
-        """Proxy with SSE streaming passthrough.
-
-        Uses an asyncio.Queue to decouple the upstream read from the
-        downstream write, so the httpx stream context can stay alive
-        while Starlette iterates the generator.
-        """
+        """Proxy with SSE streaming passthrough."""
         import asyncio
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -231,13 +228,10 @@ class PoolProxy:
                 logger.error(f"Upstream stream error: {e}")
                 await queue.put(("error", 502, str(e).encode()))
             finally:
-                await queue.put(None)  # sentinel
+                await queue.put(None)
 
-        # Start upstream reader as background task
         asyncio.create_task(_read_upstream())
 
-        # Wait for status code to arrive
-        # First item in queue tells us if it's data or error
         first = await queue.get()
         if first is None:
             return JSONResponse(status_code=502, content={"error": "Upstream closed unexpectedly"})
@@ -245,7 +239,6 @@ class PoolProxy:
         if first[0] == "error":
             return JSONResponse(status_code=first[1], content={"error": first[2][:200].decode(errors="replace")})
 
-        # It's data -- start streaming
         first_chunk = first[1]
         content_type = content_type_holder[0] if content_type_holder else "text/event-stream"
 
@@ -311,12 +304,7 @@ class PoolProxy:
         return headers
 
     def _reset_idle_timer(self, resolution: Resolution) -> None:
-        """Reset the idle timer for the worker after a successful request.
-
-        Uses the worker's idle_shutdown setting. The worker manages its own
-        idle timeout, so the pool proxy idle timer is just for revert-to-default
-        behavior (disabled for now -- let the worker handle it).
-        """
+        """Reset the idle timer for the worker after a successful request."""
         pass
 
     def get_idle_timers(self) -> dict:
@@ -333,8 +321,9 @@ class PoolProxy:
         return result
 
     async def close(self):
-        """Clean up HTTP client."""
+        """Clean up HTTP clients."""
         await self._http_client.aclose()
+        await self.router.close()
 
 
 class SwapError(Exception):

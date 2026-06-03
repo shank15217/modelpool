@@ -83,7 +83,7 @@ async def pool_status():
     if not _router or not _proxy:
         raise HTTPException(500, "Pool not configured")
 
-    worker_statuses = _router.get_all_worker_statuses()
+    worker_statuses = await _router.get_all_worker_statuses()
     idle_timers = _proxy.get_idle_timers()
 
     return {

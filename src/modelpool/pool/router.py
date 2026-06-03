@@ -5,15 +5,19 @@ it:
 1. Finds all resources tagged with that tag, sorted by priority
 2. For each candidate, checks if a worker is available
 3. Returns the best resolution (resource + worker + swap status)
+
+All worker status lookups are async and cached with a TTL to avoid
+blocking the event loop or hammering workers with status requests.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-import requests
+import httpx
 
 from modelpool.registry import Registry, Resource, Worker
 
@@ -50,18 +54,55 @@ class Resolution:
 
 
 class Router:
-    """Routes tags to resources and workers using priority-based resolution."""
+    """Routes tags to resources and workers using priority-based resolution.
 
-    def __init__(self, registry: Registry, worker_timeout: float = 5.0):
+    All methods that query workers are async. A status cache with configurable
+    TTL avoids redundant HTTP calls on every resolve().
+    """
+
+    def __init__(
+        self,
+        registry: Registry,
+        worker_timeout: float = 5.0,
+        status_ttl: float = 2.0,
+    ):
         self.registry = registry
         self.worker_timeout = worker_timeout
+        self.status_ttl = status_ttl
+
+        # Shared async HTTP client for all worker status lookups
+        self._client: Optional[httpx.AsyncClient] = None
+
+        # Status cache: worker_name -> (timestamp, status_dict | None)
+        self._status_cache: dict[str, tuple[float, Optional[dict]]] = {}
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """Lazily create the shared async HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.worker_timeout, connect=3.0),
+            )
+        return self._client
+
+    async def close(self):
+        """Clean up the HTTP client."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     @property
     def tags(self) -> dict:
         """Access all known tags for model-name lookups."""
         return self.registry.all_tags()
 
-    def resolve(self, tag: str) -> Resolution:
+    def invalidate_status_cache(self, worker_name: str = ""):
+        """Invalidate cached status for a specific worker, or all workers."""
+        if worker_name:
+            self._status_cache.pop(worker_name, None)
+        else:
+            self._status_cache.clear()
+
+    async def resolve(self, tag: str) -> Resolution:
         """Resolve a tag to a resource + worker plan.
 
         Strategy:
@@ -82,10 +123,9 @@ class Router:
         fallback_chain = []
 
         for resource, priority in candidates:
-            result = self._resolve_resource(resource, tag=tag)
+            result = await self._resolve_resource(resource, tag=tag)
             if result is not None:
                 if resolution is None:
-                    # First match = primary resolution
                     resolution = result
                     logger.info(
                         f"Tag '{tag}' -> resource '{resource.name}' "
@@ -93,7 +133,6 @@ class Router:
                         f"(swap={result.needs_swap})"
                     )
                 else:
-                    # Additional matches = fallback chain
                     fallback_chain.append((resource, result.worker))
             else:
                 logger.debug(
@@ -111,11 +150,11 @@ class Router:
         resolution.fallback_chain = fallback_chain
         return resolution
 
-    def _resolve_resource(self, resource: Resource, tag: str = "") -> Optional[Resolution]:
+    async def _resolve_resource(self, resource: Resource, tag: str = "") -> Optional[Resolution]:
         """Try to resolve a specific resource to a worker."""
         if resource.type == "external":
             return self._resolve_external(resource)
-        return self._resolve_managed(resource, tag=tag)
+        return await self._resolve_managed(resource, tag=tag)
 
     def _resolve_external(self, resource: Resource) -> Resolution:
         """External resources always resolve -- no worker state to check."""
@@ -133,7 +172,7 @@ class Router:
             needs_swap=False,
         )
 
-    def _resolve_managed(self, resource: Resource, tag: str = "") -> Optional[Resolution]:
+    async def _resolve_managed(self, resource: Resource, tag: str = "") -> Optional[Resolution]:
         """Resolve a managed resource to a worker.
 
         Priority:
@@ -143,7 +182,7 @@ class Router:
         4. Worker is ready for swap (only if under max_concurrent_models)
         """
         # Step 1: Check for a loaded generalist with capacity
-        gen = self._find_loaded_generalist(tag=tag if tag else None)
+        gen = await self._find_loaded_generalist(tag=tag if tag else None)
         if gen:
             return gen
 
@@ -156,7 +195,7 @@ class Router:
         idle_worker = None
 
         for worker in workers:
-            status = self._get_worker_status(worker)
+            status = await self._get_worker_status(worker)
             if status is None:
                 logger.debug(f"Worker '{worker.name}' unreachable, skipping")
                 continue
@@ -165,7 +204,7 @@ class Router:
             loaded = status.get("loaded_resource")
             current_models = status.get("loaded_models_count", 0)
             if loaded and current_models == 0:
-                current_models = 1  # loaded_resource implies at least 1 model
+                current_models = 1
             max_models = worker.max_concurrent_models
 
             # Best case: already loaded on this worker
@@ -182,16 +221,11 @@ class Router:
                     currently_loaded=loaded,
                 )
 
-
-
             # Swap candidate: worker has a different model loaded
-            # Swaps replace, they don't add. Always allowed for now.
-            # Rug-pull protection is handled by the worker reporting busy state.
             if state == "ready" and loaded and ready_for_swap is None:
                 ready_for_swap = (worker, loaded)
 
             # Cold load: worker is idle
-            # Capacity only matters for cold loads (adding a new model)
             if state == "idle" and idle_worker is None:
                 idle_worker = worker
 
@@ -224,16 +258,10 @@ class Router:
                 currently_loaded=currently_loaded,
             )
 
-        # No workers available
         return None
 
-    def _find_loaded_generalist(self, tag: Optional[str] = None) -> Optional[Resolution]:
-        """Find any generalist resource that is already loaded and has capacity.
-
-        Generalist resources can serve any tag when already loaded, avoiding
-        unnecessary swaps. If tag is provided, only generalists with that tag
-        in their tags dict are considered (safety check).
-        """
+    async def _find_loaded_generalist(self, tag: Optional[str] = None) -> Optional[Resolution]:
+        """Find any generalist resource that is already loaded and has capacity."""
         for res in self.registry.resources.values():
             if not res.generalist or not res.is_managed:
                 continue
@@ -242,14 +270,14 @@ class Router:
                     w = self.registry.get_worker(wname)
                 except Exception:
                     continue
-                status = self._get_worker_status(w)
+                status = await self._get_worker_status(w)
                 if status is None:
                     continue
                 if (status.get("state") == "ready"
                         and status.get("loaded_resource") == res.name):
                     current = status.get("loaded_models_count", 0)
                     if res.name and current == 0:
-                        current = 1  # loaded_resource implies at least 1 model
+                        current = 1
                     if current <= w.max_concurrent_models:
                         logger.info(
                             f"Using loaded generalist '{res.name}' on "
@@ -264,37 +292,62 @@ class Router:
                         )
         return None
 
-    def _get_worker_status(self, worker: Worker) -> Optional[dict]:
-        """Query a worker's status API. Returns None if unreachable."""
+    async def _get_worker_status(self, worker: Worker) -> Optional[dict]:
+        """Query a worker's status API with caching.
+
+        Returns cached status if within TTL, otherwise makes an async HTTP call.
+        """
         if not worker.is_managed:
             return {"state": "external"}
 
+        # Check cache
+        now = time.monotonic()
+        cached = self._status_cache.get(worker.name)
+        if cached is not None:
+            ts, status = cached
+            if now - ts < self.status_ttl:
+                return status
+
+        # Cache miss: async HTTP call
         try:
-            resp = requests.get(
+            client = await self._ensure_client()
+            resp = await client.get(
                 f"{worker.worker_url}/worker/status",
-                timeout=self.worker_timeout,
             )
             if resp.status_code == 200:
-                return resp.json()
-        except requests.ConnectionError:
+                status = resp.json()
+                self._status_cache[worker.name] = (now, status)
+                return status
+        except httpx.ConnectError:
             pass
-        except requests.Timeout:
+        except httpx.TimeoutException:
             logger.warning(f"Worker '{worker.name}' status timeout")
         except Exception as e:
             logger.warning(f"Worker '{worker.name}' status error: {e}")
 
+        # Cache the failure too (prevents hammering unreachable workers)
+        self._status_cache[worker.name] = (now, None)
         return None
 
-    def get_all_worker_statuses(self) -> dict[str, dict]:
+    async def get_all_worker_statuses(self) -> dict[str, dict]:
         """Get status from all managed workers."""
+        import asyncio
         statuses = {}
+        tasks = {}
         for name, worker in self.registry.workers.items():
             if worker.is_managed:
-                statuses[name] = self._get_worker_status(worker) or {
-                    "state": "unreachable"
-                }
+                tasks[name] = self._get_worker_status(worker)
             else:
                 statuses[name] = {"state": "external"}
+
+        # Query all workers concurrently
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for (name, _), result in zip(tasks.items(), results):
+            if isinstance(result, Exception):
+                statuses[name] = {"state": "error", "error": str(result)}
+            else:
+                statuses[name] = result or {"state": "unreachable"}
+
         return statuses
 
 

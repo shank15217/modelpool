@@ -156,8 +156,8 @@ class TestResourcesYamlGeneralist:
 class TestCapacityAutoDetect:
     """Router should auto-detect loaded_models_count from loaded_resource."""
 
-    @patch("modelpool.pool.router.requests.get")
-    def test_loaded_resource_without_count_treated_as_one(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_loaded_resource_without_count_treated_as_one(self):
         """If loaded_resource is set but loaded_models_count is absent, count=1."""
         # Build a registry with a generalist
         data = {
@@ -178,11 +178,11 @@ class TestCapacityAutoDetect:
         r = Router(reg)
 
         # Mock: loaded_resource is set, no loaded_models_count field
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "ready", "loaded_resource": "gen-model"},
-        )
-        res = r.resolve("chat")
+        async def mock_status(worker):
+            return {"state": "ready", "loaded_resource": "gen-model"}
+
+        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
+            res = await r.resolve("chat")
         # Generalist is loaded, auto-detect count=1, max=1, 1<=1 -> serves
         assert res.resource.name == "gen-model"
         assert res.needs_swap is False
