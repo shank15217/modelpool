@@ -1,10 +1,10 @@
-"""Unit tests for the pool router (tag-based resolution)."""
+"""Unit tests for the pool router (tag-based resolution).
+
+Simplified for Architecture A: synchronous, in-memory routing only.
+No HTTP calls, no mocks needed.
+"""
 
 import pytest
-import yaml
-from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
-
 from modelpool.registry import Registry
 from modelpool.pool.router import Router, Resolution, RoutingError
 
@@ -59,7 +59,6 @@ def registry_data():
                 "type": "managed",
                 "vram_gb": 32,
                 "max_model_gb": 28,
-                "default_resource": "gpu-chat-model",
             },
             "cpu-worker": {
                 "host": "192.168.1.200",
@@ -68,7 +67,6 @@ def registry_data():
                 "type": "managed",
                 "ram_gb": 48,
                 "max_model_gb": 40,
-                "default_resource": "cpu-compress-model",
             },
             "cloud-worker": {
                 "type": "external",
@@ -88,34 +86,38 @@ def router(registry):
 
 
 class TestTagResolution:
-    def test_resolve_chat_priorities(self, router):
-        """Chat tag should prefer gpu-chat-model (priority 1)."""
-        matches = router.registry.resolve_tag("chat")
-        assert len(matches) == 3
-        assert matches[0][0].name == "gpu-chat-model"  # priority 1
-        assert matches[1][0].name == "gpu-compress-model"  # priority 2
-        assert matches[2][0].name == "cloud-model"  # priority 3
+    """Tests for synchronous tag-based resolution (no HTTP calls)."""
 
-    def test_resolve_compression_priorities(self, router):
-        """Compression tag should prefer gpu-compress-model (priority 1)."""
-        matches = router.registry.resolve_tag("compression")
-        assert len(matches) == 3
-        assert matches[0][0].name == "gpu-compress-model"  # priority 1
-        assert matches[1][0].name == "cpu-compress-model"  # priority 2
-        assert matches[2][0].name == "cloud-model"  # priority 3
+    def test_resolve_chat_returns_candidates_sorted(self, router):
+        """Chat tag should return candidates sorted by priority."""
+        candidates = router.resolve("chat")
+        assert len(candidates) == 3
+        # Priority order: gpu-chat-model(1) < gpu-compress-model(2) < cloud-model(3)
+        assert candidates[0].resource.name == "gpu-chat-model"
+        assert candidates[1].resource.name == "gpu-compress-model"
+        assert candidates[2].resource.name == "cloud-model"
+
+    def test_resolve_compression_returns_sorted(self, router):
+        """Compression tag should return sorted candidates."""
+        candidates = router.resolve("compression")
+        assert len(candidates) == 3
+        assert candidates[0].resource.name == "gpu-compress-model"
+        assert candidates[1].resource.name == "cpu-compress-model"
+        assert candidates[2].resource.name == "cloud-model"
 
     def test_resolve_vision_only_cloud(self, router):
         """Vision tag only has cloud-model."""
-        matches = router.registry.resolve_tag("vision")
-        assert len(matches) == 1
-        assert matches[0][0].name == "cloud-model"
+        candidates = router.resolve("vision")
+        assert len(candidates) == 1
+        assert candidates[0].resource.name == "cloud-model"
 
-    @pytest.mark.asyncio
-    async def test_resolve_unknown_tag_raises(self, router):
+    def test_resolve_unknown_tag_raises(self, router):
+        """Unknown tag raises RoutingError."""
         with pytest.raises(RoutingError, match="No resources tagged"):
-            await router.resolve("nonexistent-tag")
+            router.resolve("nonexistent-tag")
 
     def test_all_tags(self, router):
+        """All known tags are accessible."""
         tags = router.tags
         assert "chat" in tags
         assert "compression" in tags
@@ -124,105 +126,89 @@ class TestTagResolution:
         assert "title" in tags
         assert "vision" in tags
 
+    def test_resolve_is_synchronous(self, router):
+        """resolve() returns a plain list, no await needed."""
+        result = router.resolve("chat")
+        assert isinstance(result, list)
 
-class TestResolveWithWorkerStatus:
+    def test_resolve_returns_resolutions(self, router):
+        """Each candidate is a Resolution with tag, resource, worker."""
+        candidates = router.resolve("chat")
+        for c in candidates:
+            assert isinstance(c, Resolution)
+            assert c.tag == "chat"
+            assert c.resource is not None
+            assert c.worker is not None
 
-    async def _mock_status_fn(self, status_map, default=None):
-        """Return an async function that returns status dicts per worker name."""
-        _map = status_map
-        _default = default
+    def test_resolve_external_resource(self, router):
+        """External resource resolution."""
+        candidates = router.resolve("vision")
+        assert candidates[0].is_external
+        assert candidates[0].inference_url == "https://api.cloud.com/v1"
 
-        async def _fn(worker):
-            if worker.name in _map:
-                return _map[worker.name]
-            return _default
-        return _fn
+    def test_resolve_managed_resource(self, router):
+        """Managed resource has correct inference URL."""
+        candidates = router.resolve("chat")
+        primary = candidates[0]
+        assert not primary.is_external
+        assert primary.inference_url == "http://192.168.1.100:8080"
 
-    @pytest.mark.asyncio
-    async def test_resolve_with_resource_already_loaded(self, router):
-        """If the model is already loaded, no swap needed."""
-        async def mock_status(worker):
-            return {"state": "ready", "loaded_resource": "gpu-chat-model",
-                    "loaded_models_count": 0}
+    def test_resolve_with_multiple_workers(self):
+        """Resources with multiple workers get multiple candidates."""
+        data = {
+            "resources": {
+                "shared-model": {
+                    "type": "managed",
+                    "size_gb": 10,
+                    "workers": ["worker-a", "worker-b"],
+                    "tags": {"chat": 1},
+                    "command": {"binary": "/bin/test", "flags": [["-m", "x.gguf"]]},
+                },
+            },
+            "workers": {
+                "worker-a": {"host": "10.0.0.1", "inference_port": 8080},
+                "worker-b": {"host": "10.0.0.2", "inference_port": 8081},
+            },
+        }
+        reg = Registry(data)
+        r = Router(reg)
+        candidates = r.resolve("chat")
+        assert len(candidates) == 2
+        assert candidates[0].worker.name == "worker-a"
+        assert candidates[1].worker.name == "worker-b"
 
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            resolution = await router.resolve("chat")
-        assert resolution.resource.name == "gpu-chat-model"
-        assert resolution.worker.name == "gpu-worker"
-        assert resolution.needs_swap is False
-        assert resolution.currently_loaded == "gpu-chat-model"
-
-    @pytest.mark.asyncio
-    async def test_resolve_idle_worker_cold_load(self, router):
-        """Idle worker gets cold load."""
-        async def mock_status(worker):
-            return {"state": "idle", "loaded_resource": None}
-
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            resolution = await router.resolve("chat")
-        assert resolution.resource.name == "gpu-chat-model"
-        assert resolution.worker.name == "gpu-worker"
-        assert resolution.needs_swap is True
-        assert resolution.currently_loaded is None
-
-    @pytest.mark.asyncio
-    async def test_resolve_swap_needed(self, router):
-        """Worker has wrong model loaded -> needs swap."""
-        async def mock_status(worker):
-            if worker.name == "gpu-worker":
-                return {"state": "ready", "loaded_resource": "gpu-compress-model",
-                        "loaded_models_count": 1}
-            return {"state": "idle", "loaded_resource": None,
-                    "loaded_models_count": 0}
-
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            resolution = await router.resolve("chat")
-        assert resolution.resource.name == "gpu-chat-model"
-        assert resolution.worker.name == "gpu-worker"
-        assert resolution.needs_swap is True
-        assert resolution.currently_loaded == "gpu-compress-model"
-
-    @pytest.mark.asyncio
-    async def test_fallback_to_cloud_when_worker_unreachable(self, router):
-        """Worker unreachable -> falls back to cloud."""
-        async def mock_status(worker):
-            return None  # unreachable
-
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            resolution = await router.resolve("chat")
-        assert resolution.resource.name == "cloud-model"
-        assert resolution.is_external
-        assert resolution.needs_swap is False
-
-    @pytest.mark.asyncio
-    async def test_fallback_chain_populated(self, router):
-        """Resolution should have fallback chain from lower-priority resources."""
-        async def mock_status(worker):
-            return {"state": "ready", "loaded_resource": "gpu-chat-model",
-                    "loaded_models_count": 0}
-
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            resolution = await router.resolve("chat")
-        # Should have fallback chain from priority 2 and 3
-        assert len(resolution.fallback_chain) >= 1
+    def test_tag_priority_ordering(self, router):
+        """Lower priority number comes first."""
+        candidates = router.resolve("chat")
+        priorities = []
+        for c in candidates:
+            priorities.append(c.resource.tags["chat"])
+        assert priorities == sorted(priorities)
 
 
 class TestResolutionProperties:
-    @pytest.mark.asyncio
-    async def test_managed_resolution(self, router):
-        async def mock_status(worker):
-            return {"state": "idle", "loaded_resource": None}
+    """Tests for Resolution dataclass properties."""
 
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            resolution = await router.resolve("chat")
-        assert not resolution.is_external
-        assert resolution.inference_url == "http://192.168.1.100:8080"
-        assert resolution.worker_api_url == "http://192.168.1.100:9100"
+    def test_is_external_for_cloud(self, router):
+        candidates = router.resolve("vision")
+        assert candidates[0].is_external
 
-    @pytest.mark.asyncio
-    async def test_external_resolution(self, router):
-        # External doesn't query worker status
-        resolution = await router.resolve("vision")
-        assert resolution.is_external
-        assert resolution.inference_url == "https://api.cloud.com/v1"
-        assert resolution.worker.name == "cloud-worker"
+    def test_is_not_external_for_managed(self, router):
+        candidates = router.resolve("chat")
+        assert not candidates[0].is_external
+
+    def test_inference_url_external(self, router):
+        candidates = router.resolve("vision")
+        assert candidates[0].inference_url == "https://api.cloud.com/v1"
+
+    def test_inference_url_managed(self, router):
+        candidates = router.resolve("chat")
+        assert candidates[0].inference_url == "http://192.168.1.100:8080"
+
+    def test_resolution_has_no_swap_fields(self, router):
+        """Architecture A: Resolution has no needs_swap, currently_loaded, fallback_chain."""
+        candidates = router.resolve("chat")
+        r = candidates[0]
+        assert not hasattr(r, "needs_swap")
+        assert not hasattr(r, "currently_loaded")
+        assert not hasattr(r, "fallback_chain")

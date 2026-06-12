@@ -1,13 +1,13 @@
-"""Tests for pool/proxy.py - routing proxy, streaming, auth injection, fallbacks.
+"""Tests for pool/proxy.py - routing proxy, streaming, auth injection.
 
+Simplified for Architecture A: no swap, no fallback, no idle timers.
 Tests cover:
 - Tag resolution from header/model field/default
-- Swap triggering for managed resources
 - Auth injection for external resources
 - Streaming proxy passthrough
 - Non-streaming proxy
-- Fallback on swap failure
-- Connection error handling
+- Failover across candidates
+- Safe JSON parsing
 """
 
 import json
@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from modelpool.registry import Registry, Resource, Worker, AuthConfig
 from modelpool.pool.router import Router, RoutingError, Resolution
-from modelpool.pool.proxy import PoolProxy, SwapError, _safe_json
+from modelpool.pool.proxy import PoolProxy, _safe_json
 
 
 def make_test_registry():
@@ -32,7 +32,6 @@ def make_test_registry():
                 "ctx": 131072,
                 "workers": ["hwrouter"],
                 "tags": {"chat": 1, "agentic": 1},
-                "generalist": True,
                 "command": {"binary": "/bin/test", "flags": [["-m", "27b.gguf"]]},
             },
             "gpu-35b": {
@@ -66,7 +65,6 @@ def make_test_registry():
             "hwrouter": {
                 "host": "192.168.35.185",
                 "pool_secret": "mp-secret",
-                "max_concurrent_models": 1,
             },
             "cloud-xai": {"type": "external"},
             "cloud-zai": {"type": "external"},
@@ -140,9 +138,6 @@ class TestProxyAuthInjection:
             tag="triage",
             resource=resource,
             worker=worker,
-            needs_swap=False,
-            currently_loaded=None,
-            fallback_chain=[],
         )
 
         with patch.dict("os.environ", {"TEST_API_KEY": "test-key-123"}):
@@ -165,9 +160,6 @@ class TestProxyAuthInjection:
             tag="chat",
             resource=resource,
             worker=worker,
-            needs_swap=False,
-            currently_loaded=None,
-            fallback_chain=[],
         )
 
         mock_request = MagicMock()
@@ -189,9 +181,6 @@ class TestProxyAuthInjection:
             tag="triage",
             resource=resource,
             worker=worker,
-            needs_swap=False,
-            currently_loaded=None,
-            fallback_chain=[],
         )
 
         with patch.dict("os.environ", {}, clear=True):
@@ -200,112 +189,6 @@ class TestProxyAuthInjection:
             headers = proxy._build_proxy_headers(mock_request, resolution)
 
         assert "authorization" not in headers
-
-
-class TestProxySwap:
-    """Tests for swap triggering."""
-
-    @patch("modelpool.pool.proxy.httpx.AsyncClient")
-    def test_swap_sends_pool_secret(self, mock_client_class):
-        """Swap request must include X-Pool-Secret header."""
-        import asyncio
-
-        reg = make_test_registry()
-        router = Router(reg)
-        proxy = PoolProxy(reg, router)
-
-        resource = reg.get_resource("gpu-35b")
-        worker = reg.get_worker("hwrouter")
-
-        resolution = Resolution(
-            tag="compression",
-            resource=resource,
-            worker=worker,
-            needs_swap=True,
-            currently_loaded="gpu-27b",
-            fallback_chain=[],
-        )
-
-        mock_client = AsyncMock()
-        mock_response = MagicMock(status_code=202, text="ok")
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_class.return_value = mock_client
-
-        asyncio.run(proxy._trigger_swap(resolution))
-
-        post_call = mock_client.post.call_args
-        assert post_call is not None
-        headers = post_call[1].get("headers", {})
-        assert headers.get("X-Pool-Secret") == "mp-secret"
-
-    @patch("modelpool.pool.proxy.httpx.AsyncClient")
-    def test_swap_non_202_raises_swap_error(self, mock_client_class):
-        """Non-202 response from worker should raise SwapError."""
-        import asyncio
-
-        reg = make_test_registry()
-        router = Router(reg)
-        proxy = PoolProxy(reg, router)
-
-        resource = reg.get_resource("gpu-35b")
-        worker = reg.get_worker("hwrouter")
-
-        resolution = Resolution(
-            tag="compression",
-            resource=resource,
-            worker=worker,
-            needs_swap=True,
-            currently_loaded="gpu-27b",
-            fallback_chain=[],
-        )
-
-        mock_client = AsyncMock()
-        mock_response = MagicMock(status_code=500, text="internal error")
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_class.return_value = mock_client
-
-        with pytest.raises(SwapError, match="500"):
-            asyncio.run(proxy._trigger_swap(resolution))
-
-
-class TestProxyIdleTimers:
-    """Tests for idle timer state tracking."""
-
-    def test_get_idle_timers_empty(self):
-        reg = make_test_registry()
-        router = Router(reg)
-        proxy = PoolProxy(reg, router)
-        assert proxy.get_idle_timers() == {}
-
-    def test_get_idle_timers_with_active(self):
-        import time
-
-        reg = make_test_registry()
-        router = Router(reg)
-        proxy = PoolProxy(reg, router)
-
-        proxy._idle_timers["hwrouter"] = ("gpu-35b", time.time() + 300)
-
-        timers = proxy.get_idle_timers()
-        assert "hwrouter" in timers
-        assert timers["hwrouter"]["resource"] == "gpu-35b"
-        assert timers["hwrouter"]["expires_in_s"] > 0
-
-    def test_get_idle_timers_expired_excluded(self):
-        import time
-
-        reg = make_test_registry()
-        router = Router(reg)
-        proxy = PoolProxy(reg, router)
-
-        proxy._idle_timers["hwrouter"] = ("gpu-35b", time.time() - 10)
-
-        timers = proxy.get_idle_timers()
-        assert "hwrouter" not in timers
 
 
 class TestProxyExternalResources:
@@ -344,3 +227,25 @@ class TestProxyClose:
         proxy._http_client = AsyncMock()
         asyncio.run(proxy.close())
         proxy._http_client.aclose.assert_called_once()
+
+
+class TestProxyNoSwap:
+    """Architecture A: proxy has no swap-related methods or state."""
+
+    def test_no_trigger_swap_method(self):
+        """PoolProxy should not have _trigger_swap."""
+        assert not hasattr(PoolProxy, "_trigger_swap")
+
+    def test_no_try_fallbacks_method(self):
+        """PoolProxy should not have _try_fallbacks."""
+        assert not hasattr(PoolProxy, "_try_fallbacks")
+
+    def test_no_idle_timers(self):
+        """PoolProxy should not have idle timer state."""
+        assert not hasattr(PoolProxy, "get_idle_timers")
+        assert not hasattr(PoolProxy, "_reset_idle_timer")
+
+    def test_no_swap_error(self):
+        """SwapError should not exist in proxy module."""
+        import modelpool.pool.proxy as proxy_mod
+        assert not hasattr(proxy_mod, "SwapError")

@@ -1,11 +1,13 @@
 """Tests for worker/loader.py - subprocess manager state machine and lifecycle.
 
+Simplified for Architecture A: static pool, no dynamic swapping.
 Tests cover:
 - State machine transitions (valid and invalid)
 - Command building from resource definitions
-- start/stop/drain/load_resource/unload/revert lifecycle
+- start/stop lifecycle
 - Health check polling
-- Error handling and recovery
+- Status reporting
+- Error handling
 """
 
 import os
@@ -17,7 +19,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from modelpool.registry import Registry, Resource, Worker
+from modelpool.registry import Resource
 from modelpool.worker.loader import (
     LlamaServerManager,
     StateError,
@@ -25,7 +27,6 @@ from modelpool.worker.loader import (
     IDLE,
     LOADING,
     READY,
-    DRAINING,
     STOPPING,
     ERROR,
     VALID_TRANSITIONS,
@@ -37,7 +38,7 @@ from modelpool.worker.loader import (
 # ============================================================
 
 def make_resource(name="test-model", binary="/usr/bin/test-server", flags=None,
-                  workers=None, tags=None, generalist=False):
+                  workers=None, tags=None):
     """Create a minimal Resource for testing."""
     return Resource(
         name=name,
@@ -46,64 +47,7 @@ def make_resource(name="test-model", binary="/usr/bin/test-server", flags=None,
         flags=flags or [["-m", "/models/test.gguf"], ["-c", "4096"]],
         workers=workers or ["test-worker"],
         tags=tags or {"chat": 1},
-        generalist=generalist,
     )
-
-
-def make_worker(name="test-worker", host="10.0.0.1", default_resource="test-model",
-                drain_timeout=10, swap_timeout=30, pool_secret="secret123"):
-    """Create a minimal Worker for testing."""
-    return Worker(
-        name=name,
-        host=host,
-        worker_port=9100,
-        inference_port=8080,
-        type="managed",
-        default_resource=default_resource,
-        drain_timeout=drain_timeout,
-        swap_timeout=swap_timeout,
-        pool_secret=pool_secret,
-    )
-
-
-def make_registry():
-    """Create a minimal registry with one resource and one worker."""
-    data = {
-        "resources": {
-            "test-model": {
-                "type": "managed",
-                "size_gb": 10,
-                "ctx": 4096,
-                "workers": ["test-worker"],
-                "tags": {"chat": 1},
-                "command": {
-                    "binary": "/usr/bin/test-server",
-                    "flags": [["-m", "/models/test.gguf"], ["-c", "4096"]],
-                },
-            },
-            "alt-model": {
-                "type": "managed",
-                "size_gb": 8,
-                "ctx": 8192,
-                "workers": ["test-worker"],
-                "tags": {"compression": 1},
-                "command": {
-                    "binary": "/usr/bin/test-server",
-                    "flags": [["-m", "/models/alt.gguf"], ["-c", "8192"]],
-                },
-            },
-        },
-        "workers": {
-            "test-worker": {
-                "host": "10.0.0.1",
-                "default_resource": "test-model",
-                "drain_timeout": 10,
-                "swap_timeout": 30,
-                "pool_secret": "secret123",
-            },
-        },
-    }
-    return Registry(data)
 
 
 # ============================================================
@@ -115,7 +59,7 @@ class TestStateMachine:
 
     def test_all_valid_transitions_defined(self):
         """Every state has at least one valid transition."""
-        for state in [IDLE, LOADING, READY, DRAINING, STOPPING, ERROR]:
+        for state in [IDLE, LOADING, READY, STOPPING, ERROR]:
             assert state in VALID_TRANSITIONS, f"State '{state}' has no transitions defined"
 
     def test_idle_can_transition_to_loading(self):
@@ -136,30 +80,17 @@ class TestStateMachine:
         mgr._transition(ERROR)
         assert mgr.state == ERROR
 
-    def test_ready_can_transition_to_draining(self):
+    def test_ready_can_transition_to_stopping(self):
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-        mgr._transition(DRAINING)
-        assert mgr.state == DRAINING
-
-    def test_ready_can_transition_to_loading(self):
-        """Direct reload from READY (bypasses drain -- used when forced)."""
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr._transition(LOADING)
-        assert mgr.state == LOADING
+        mgr._transition(STOPPING)
+        assert mgr.state == STOPPING
 
     def test_ready_can_transition_to_error(self):
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
         mgr._transition(ERROR)
         assert mgr.state == ERROR
-
-    def test_draining_can_transition_to_stopping(self):
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = DRAINING
-        mgr._transition(STOPPING)
-        assert mgr.state == STOPPING
 
     def test_stopping_can_transition_to_idle(self):
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
@@ -193,16 +124,16 @@ class TestStateMachine:
         with pytest.raises(StateError, match="Invalid transition"):
             mgr._transition(READY)  # IDLE -> READY is not valid
 
-    def test_idle_to_draining_invalid(self):
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        with pytest.raises(StateError):
-            mgr._transition(DRAINING)
-
     def test_ready_to_idle_invalid(self):
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
         with pytest.raises(StateError):
             mgr._transition(IDLE)
+
+    def test_no_draining_state(self):
+        """Architecture A: DRAINING state removed."""
+        from modelpool.worker.loader import VALID_TRANSITIONS
+        assert "draining" not in VALID_TRANSITIONS
 
 
 # ============================================================
@@ -478,200 +409,6 @@ class TestStop:
 
 
 # ============================================================
-# Drain Lifecycle
-# ============================================================
-
-class TestDrain:
-    """Tests for the drain() method."""
-
-    def test_drain_only_from_ready(self):
-        """drain() is a no-op if not in READY state."""
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = IDLE
-        mgr.drain(timeout=1)
-        assert mgr.state == IDLE  # no transition
-
-    @patch("modelpool.worker.loader.requests.get")
-    def test_drain_succeeds_when_slots_zero(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"slots_processing": 0},
-        )
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr.drain(timeout=5)
-
-        assert mgr.state == DRAINING
-
-    @patch("modelpool.worker.loader.requests.get")
-    def test_drain_waits_for_slots_to_clear(self, mock_get):
-        call_count = [0]
-
-        def side_effect(*a, **kw):
-            call_count[0] += 1
-            if call_count[0] < 3:
-                return MagicMock(
-                    status_code=200,
-                    json=lambda: {"slots_processing": 2},
-                )
-            return MagicMock(
-                status_code=200,
-                json=lambda: {"slots_processing": 0},
-            )
-
-        mock_get.side_effect = side_effect
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr.drain(timeout=30)
-
-        assert mgr.state == DRAINING
-        assert call_count[0] >= 3
-
-    @patch("modelpool.worker.loader.requests.get")
-    def test_drain_timeout_forces_proceed(self, mock_get):
-        """If slots never clear, drain() proceeds after timeout."""
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"slots_processing": 5},
-        )
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr.drain(timeout=1)
-
-        assert mgr.state == DRAINING  # proceeds anyway
-
-    @patch("modelpool.worker.loader.requests.get")
-    def test_drain_connection_error_completes(self, mock_get):
-        """If server is unreachable, drain completes (already stopped)."""
-        mock_get.side_effect = Exception("connection refused")
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr.drain(timeout=5)
-
-        assert mgr.state == DRAINING
-
-
-# ============================================================
-# Full Lifecycle (load_resource)
-# ============================================================
-
-class TestLoadResource:
-    """Tests for the full load_resource cycle."""
-
-    @patch("modelpool.worker.loader.requests.get")
-    @patch("modelpool.worker.loader.subprocess.Popen")
-    def test_load_resource_from_idle(self, mock_popen, mock_get):
-        """Cold load: IDLE -> LOADING -> READY."""
-        mock_popen.return_value = MagicMock(pid=123)
-        mock_get.return_value = MagicMock(status_code=200)
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        assert mgr.state == IDLE
-
-        res = make_resource()
-        mgr.load_resource(res)
-
-        assert mgr.state == READY
-        assert mgr.loaded_resource == "test-model"
-
-    @patch("modelpool.worker.loader.requests.get")
-    @patch("modelpool.worker.loader.subprocess.Popen")
-    def test_load_resource_from_ready_drains_and_swaps(self, mock_popen, mock_get):
-        """Hot swap: READY -> DRAINING -> STOPPING -> (stop) -> LOADING -> READY."""
-        # First call: start the initial model
-        mock_popen.return_value = MagicMock(pid=123)
-
-        drain_call = {"count": 0}
-        health_call = {"count": 0}
-
-        def get_side_effect(url, **kwargs):
-            if "/health" in url:
-                health_call["count"] += 1
-                return MagicMock(
-                    status_code=200,
-                    json=lambda: {"slots_processing": 0, "slots_idle": 2},
-                )
-            return MagicMock(status_code=200)
-
-        mock_get.side_effect = get_side_effect
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-
-        # Load first resource
-        res1 = make_resource(name="model-a")
-        mgr.load_resource(res1)
-        assert mgr.state == READY
-        assert mgr.loaded_resource == "model-a"
-
-        # Swap to second resource
-        res2 = make_resource(name="model-b")
-        mgr.load_resource(res2, drain_timeout=5)
-        assert mgr.state == READY
-        assert mgr.loaded_resource == "model-b"
-
-    def test_load_resource_rejects_when_loading(self):
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = LOADING
-        with pytest.raises(StateError, match="Already loading"):
-            mgr.load_resource(make_resource())
-
-
-# ============================================================
-# Unload
-# ============================================================
-
-class TestUnload:
-
-    @patch("modelpool.worker.loader.os.killpg")
-    @patch("modelpool.worker.loader.os.getpgid")
-    @patch("modelpool.worker.loader.requests.get")
-    def test_unload_from_ready(self, mock_get, mock_getpgid, mock_killpg):
-        mock_get.return_value = MagicMock(
-            status_code=200, json=lambda: {"slots_processing": 0}
-        )
-        mock_getpgid.return_value = 100
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr.process = MagicMock(pid=123, wait=MagicMock(return_value=0))
-        mgr.loaded_resource = "test"
-
-        mgr.unload(drain_timeout=5)
-        assert mgr.process is None
-
-    def test_unload_from_idle_is_noop(self):
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        assert mgr.state == IDLE
-        mgr.unload()
-        assert mgr.state == IDLE
-
-
-# ============================================================
-# Revert
-# ============================================================
-
-class TestRevert:
-
-    @patch("modelpool.worker.loader.requests.get")
-    @patch("modelpool.worker.loader.subprocess.Popen")
-    def test_revert_loads_default_resource(self, mock_popen, mock_get):
-        mock_popen.return_value = MagicMock(pid=123)
-        mock_get.return_value = MagicMock(status_code=200)
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        registry = make_registry()
-
-        mgr.revert(registry, "test-worker")
-
-        assert mgr.state == READY
-        assert mgr.loaded_resource == "test-model"
-
-
-# ============================================================
 # Status and Helpers
 # ============================================================
 
@@ -686,9 +423,7 @@ class TestStatus:
         assert status["uptime_s"] is None
 
     @patch("modelpool.worker.loader.requests.get")
-    @patch("modelpool.worker.loader.subprocess.Popen")
-    def test_status_ready_with_slot_info(self, mock_popen, mock_get):
-        mock_popen.return_value = MagicMock(pid=123)
+    def test_status_ready_with_slot_info(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: {"slots_idle": 1, "slots_processing": 0},
@@ -800,3 +535,27 @@ class TestKillProcess:
 
         mgr._kill_process()
         assert mgr.process is None  # cleanup still runs
+
+
+# ============================================================
+# Architecture A: Removed features
+# ============================================================
+
+class TestRemovedFeatures:
+    """Verify dynamic pool features are removed in Architecture A."""
+
+    def test_no_drain_method(self):
+        assert not hasattr(LlamaServerManager, "drain")
+
+    def test_no_load_resource_method(self):
+        assert not hasattr(LlamaServerManager, "load_resource")
+
+    def test_no_revert_method(self):
+        assert not hasattr(LlamaServerManager, "revert")
+
+    def test_no_unload_method(self):
+        assert not hasattr(LlamaServerManager, "unload")
+
+    def test_no_draining_state(self):
+        from modelpool.worker.loader import VALID_TRANSITIONS
+        assert "draining" not in VALID_TRANSITIONS

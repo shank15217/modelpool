@@ -70,8 +70,8 @@ def main() -> None:
     worker_name = wconfig.get("worker_id", "unknown")
     inference_port = wconfig.get("inference_port", 8080)
     log_dir = wconfig.get("log_dir", "/var/log/modelpool")
-    idle_shutdown = wconfig.get("idle_shutdown", 0)
     pool_secret = wconfig.get("pool_secret")
+    resource_name = wconfig.get("resource")  # model to load at boot
 
     # Get worker from registry for settings (including pool_secret)
     try:
@@ -85,21 +85,30 @@ def main() -> None:
 
     # Create manager, watchdog, configure app
     manager = LlamaServerManager(inference_port=inference_port, log_dir=log_dir)
-    watchdog = Watchdog(manager, registry, worker_name)
-    configure(manager, registry, watchdog, worker_name, idle_shutdown=idle_shutdown, pool_secret=pool_secret)
+    watchdog = Watchdog(manager)
+    configure(manager, watchdog, pool_secret=pool_secret)
 
-    # Start idle -- don't load any model until the pool requests one
-    if idle_shutdown > 0:
-        logging.info(f"Idle shutdown enabled ({idle_shutdown}s). Starting idle, no model loaded.")
-    else:
-        # Legacy behavior: load default resource on startup
+    # Load the assigned model at boot (static pool: one model, served forever)
+    if resource_name:
         try:
-            default_resource = registry.get_default_resource(worker_name)
-            logging.info(f"Loading default resource: {default_resource.name}")
-            manager.start(default_resource)
+            resource = registry.get_resource(resource_name)
+            logging.info(f"Loading resource: {resource.name}")
+            manager.start(resource)
         except Exception as e:
-            logging.warning(f"Could not load default resource: {e}")
+            logging.error(f"Failed to load resource '{resource_name}': {e}")
             logging.warning("Worker starting in idle state")
+    else:
+        # Try to find the resource from the worker's assigned resources
+        try:
+            resources = registry.get_resources_for_worker(worker_name)
+            if resources:
+                resource = resources[0]
+                logging.info(f"Loading first assigned resource: {resource.name}")
+                manager.start(resource)
+            else:
+                logging.warning("No resource specified and no resources assigned to worker")
+        except Exception as e:
+            logging.warning(f"Could not determine resource to load: {e}")
 
     # Start serving
     logging.info(f"Worker '{worker_name}' listening on {args.host}:{args.port}")

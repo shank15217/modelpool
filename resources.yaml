@@ -76,7 +76,6 @@ resources:
         - '0.75'
       - - --cache-ram
         - '16384'
-    generalist: true
   qwen36-35b-a3b_mtp_no-reasoning_multi-gpu:
     description: 35B MoE (3B active), MTP speculative, reasoning OFF, 262K ctx, both
       GPUs. Best for context compression.
@@ -273,9 +272,6 @@ workers:
     type: managed
     vram_gb: 32
     max_model_gb: 28
-    swap_timeout: 120
-    drain_timeout: 30
-    default_resource: qwen36-27b_mtp_reasoning_multi-gpu
     pool_secret: mp-secret-homelab
   pvellm:
     host: 192.168.35.17
@@ -284,9 +280,6 @@ workers:
     type: managed
     ram_gb: 48
     max_model_gb: 40
-    swap_timeout: 60
-    drain_timeout: 10
-    default_resource: qwen36-35b-a3b_no-reasoning_cpu
     pool_secret: mp-secret-homelab
   cloud-xai:
     type: external

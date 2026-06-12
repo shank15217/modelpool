@@ -1,4 +1,8 @@
-"""Worker subprocess manager - lifecycle for llama-server child processes."""
+"""Worker subprocess manager - lifecycle for llama-server child processes.
+
+Simplified for Architecture A: static pool, no dynamic swapping.
+The worker starts one model at boot and serves it forever.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ from typing import Optional
 
 import requests
 
-from modelpool.registry import Registry, Resource
+from modelpool.registry import Resource
 
 logger = logging.getLogger("modelpool.worker")
 
@@ -20,15 +24,13 @@ logger = logging.getLogger("modelpool.worker")
 IDLE = "idle"
 LOADING = "loading"
 READY = "ready"
-DRAINING = "draining"
 STOPPING = "stopping"
 ERROR = "error"
 
 VALID_TRANSITIONS = {
     IDLE: {LOADING},
     LOADING: {READY, ERROR},
-    READY: {DRAINING, LOADING, ERROR},
-    DRAINING: {STOPPING, ERROR},
+    READY: {STOPPING, ERROR},
     STOPPING: {IDLE, LOADING, ERROR},
     ERROR: {IDLE, LOADING},
 }
@@ -154,68 +156,6 @@ class LlamaServerManager:
                 pass
 
         self._cleanup()
-
-    def drain(self, timeout: int = 30) -> None:
-        """Wait for all in-flight requests to complete."""
-        if self.state != READY:
-            return
-
-        self._transition(DRAINING)
-        deadline = time.time() + timeout
-
-        while time.time() < deadline:
-            try:
-                resp = requests.get(
-                    f"http://localhost:{self.inference_port}/health",
-                    timeout=2,
-                )
-                data = resp.json()
-                slots_processing = data.get("slots_processing", 0)
-                if slots_processing == 0:
-                    logger.info("Drain complete: no in-flight requests")
-                    return
-                logger.debug(f"Draining: {slots_processing} slots still processing")
-            except requests.ConnectionError:
-                logger.info("Drain complete: server unreachable (already stopped)")
-                return
-            except Exception as e:
-                logger.debug(f"Drain check error: {e}")
-            time.sleep(1)
-
-        logger.warning(f"Drain timeout ({timeout}s): forcing proceed")
-
-    def load_resource(self, resource: Resource, drain_timeout: int = 30, swap_timeout: int = 120) -> None:
-        """Full lifecycle: drain current -> stop -> start new resource."""
-        if self.state == LOADING:
-            raise StateError("Already loading a resource")
-
-        # If currently serving, drain and stop first
-        if self.state == READY:
-            self.drain(timeout=drain_timeout)
-            self._transition(STOPPING) if self.state == DRAINING else None
-            self.stop()
-
-        # Start the new resource
-        self.start(resource, timeout=swap_timeout)
-
-    def unload(self, drain_timeout: int = 30) -> None:
-        """Drain and stop, leaving the worker idle."""
-        if self.state == READY:
-            self.drain(timeout=drain_timeout)
-        if self.process:
-            if self.state == DRAINING:
-                self._transition(STOPPING)
-            self.stop()
-
-    def revert(self, registry: Registry, worker_name: str) -> None:
-        """Revert to the default resource for this worker."""
-        default = registry.get_default_resource(worker_name)
-        worker = registry.get_worker(worker_name)
-        self.load_resource(
-            default,
-            drain_timeout=worker.drain_timeout,
-            swap_timeout=worker.swap_timeout,
-        )
 
     def get_status(self) -> dict:
         """Current status for /worker/status endpoint."""

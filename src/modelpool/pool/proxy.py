@@ -1,8 +1,9 @@
 """Pool HTTP proxy - reverse proxy with streaming and task routing.
 
 Accepts standard OpenAI /v1/chat/completions requests, resolves the task
-type from X-Task-Type header, triggers model swaps if needed, and proxies
-the request to the right worker or external endpoint.
+type from X-Task-Type header or model field, and proxies the request to
+the right worker or external endpoint. Tries candidates in priority order
+for failover.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from modelpool.registry import Registry, RegistryError
 from modelpool.pool.router import Router, RoutingError, Resolution
-from modelpool.worker.loader import LoadError
 
 logger = logging.getLogger("modelpool.pool.proxy")
 
@@ -30,9 +30,6 @@ class PoolProxy:
         self.registry = registry
         self.router = router
         self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
-
-        # Idle timer state: worker_name -> (resource_name, expires_at)
-        self._idle_timers: dict[str, tuple[str, float]] = {}
 
     async def handle_chat_completions(self, request: Request) -> StreamingResponse | JSONResponse:
         """Handle /v1/chat/completions with task routing.
@@ -62,138 +59,69 @@ class PoolProxy:
         if not tag:
             tag = "chat"
 
-        # Route to resource + worker (now async)
+        # Route to candidates (synchronous, in-memory)
         try:
-            resolution = await self.router.resolve(tag)
+            candidates = self.router.resolve(tag)
         except RoutingError as e:
             logger.error(f"Routing failed for task '{tag}': {e}")
             raise HTTPException(503, str(e))
         except RegistryError as e:
             raise HTTPException(404, str(e))
 
+        primary = candidates[0]
         logger.info(
-            f"Task '{tag}' -> resource '{resolution.resource.name}' "
-            f"on worker '{resolution.worker.name}' "
-            f"(swap={resolution.needs_swap}, external={resolution.is_external})"
+            f"Task '{tag}' -> resource '{primary.resource.name}' "
+            f"on worker '{primary.worker.name}' (external={primary.is_external})"
         )
 
-        # Handle swap if needed (managed resources only)
-        if resolution.needs_swap and not resolution.is_external:
+        # Try candidates in order for failover
+        last_error = None
+        for i, resolution in enumerate(candidates):
+            target_url = f"{resolution.inference_url}/v1/chat/completions"
+            headers = self._build_proxy_headers(request, resolution)
+
+            # Check if streaming
+            stream = body_json.get("stream", False) if body_json else False
+
             try:
-                await self._trigger_swap(resolution)
-            except SwapError as e:
-                logger.warning(f"Swap failed: {e}, trying fallbacks")
-                resolution = await self._try_fallbacks(tag, resolution)
-                if resolution is None:
-                    raise HTTPException(503, f"Swap failed and no fallbacks available: {e}")
+                if stream:
+                    return await self._proxy_stream(target_url, headers, body, resolution, start_time)
+                else:
+                    return await self._proxy_sync(target_url, headers, body, resolution, start_time)
+            except httpx.ConnectError as e:
+                last_error = e
+                logger.warning(
+                    f"Connection failed to '{resolution.worker.name}' "
+                    f"({target_url}): {e}, trying next candidate"
+                )
+                continue
+            except httpx.TimeoutException as e:
+                last_error = e
+                logger.warning(
+                    f"Timeout on '{resolution.worker.name}' "
+                    f"({target_url}): {e}, trying next candidate"
+                )
+                continue
 
-        # Reset idle timer for this worker
-        if not resolution.is_external:
-            self._reset_idle_timer(resolution)
-
-        # Invalidate status cache for this worker (swap may have changed state)
-        if resolution.needs_swap:
-            self.router.invalidate_status_cache(resolution.worker.name)
-
-        # Proxy the request
-        target_url = f"{resolution.inference_url}/v1/chat/completions"
-        headers = self._build_proxy_headers(request, resolution)
-
-        # Check if streaming
-        stream = body_json.get("stream", False) if body_json else False
-
-        try:
-            if stream:
-                return await self._proxy_stream(target_url, headers, body, resolution, start_time)
-            else:
-                return await self._proxy_sync(target_url, headers, body, resolution, start_time)
-        except httpx.ConnectError as e:
-            logger.error(f"Connection failed to {target_url}: {e}")
-            raise HTTPException(502, f"Worker unreachable: {resolution.worker.name}")
-        except httpx.TimeoutException as e:
-            logger.error(f"Timeout proxying to {target_url}: {e}")
-            raise HTTPException(504, f"Worker timeout: {resolution.worker.name}")
+        # All candidates failed
+        logger.error(f"All {len(candidates)} candidates failed for tag '{tag}'")
+        raise HTTPException(502, f"All workers unreachable for tag '{tag}': {last_error}")
 
     async def handle_models(self, request: Request) -> JSONResponse:
-        """Handle /v1/models - aggregate loaded models across workers."""
+        """Handle /v1/models - list all configured resources."""
         models = []
-        statuses = await self.router.get_all_worker_statuses()
 
-        for worker_name, status in statuses.items():
-            if status.get("state") == "ready" and status.get("loaded_resource"):
-                resource_name = status["loaded_resource"]
-                try:
-                    resource = self.registry.get_resource(resource_name)
-                    models.append({
-                        "id": resource_name,
-                        "object": "model",
-                        "owned_by": "modelpool",
-                        "worker": worker_name,
-                        "ctx": resource.ctx,
-                        "capabilities": resource.capabilities,
-                    })
-                except RegistryError:
-                    pass
-
-        # Add external resources
         for name, resource in self.registry.resources.items():
-            if resource.type == "external":
-                models.append({
-                    "id": name,
-                    "object": "model",
-                    "owned_by": "external",
-                    "worker": resource.workers[0] if resource.workers else "unknown",
-                    "ctx": resource.ctx,
-                    "capabilities": resource.capabilities,
-                })
+            models.append({
+                "id": name,
+                "object": "model",
+                "owned_by": "modelpool" if resource.is_managed else "external",
+                "worker": resource.workers[0] if resource.workers else "unknown",
+                "ctx": resource.ctx,
+                "capabilities": resource.capabilities,
+            })
 
         return JSONResponse({"object": "list", "data": models})
-
-    async def _trigger_swap(self, resolution: Resolution) -> None:
-        """Trigger a model swap on the target worker (async)."""
-        timeout = 120  # default swap timeout
-
-        logger.info(
-            f"Triggering swap on '{resolution.worker.name}': "
-            f"{resolution.currently_loaded} -> {resolution.resource.name}"
-        )
-
-        url = f"{resolution.worker_api_url}/worker/load"
-        headers = {}
-        if resolution.worker.pool_secret:
-            headers["X-Pool-Secret"] = resolution.worker.pool_secret
-
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
-                resp = await client.post(
-                    url,
-                    json={"resource": resolution.resource.name},
-                    headers=headers,
-                )
-                if resp.status_code not in (200, 202):
-                    raise SwapError(
-                        f"Worker returned {resp.status_code}: {resp.text[:200]}"
-                    )
-            logger.info(f"Swap complete: {resolution.resource.name} loaded")
-        except httpx.TimeoutException:
-            raise SwapError(f"Swap timed out after {timeout}s")
-        except httpx.ConnectError:
-            raise SwapError(f"Worker unreachable during swap")
-
-    async def _try_fallbacks(
-        self, tag: str, failed_resolution: Resolution
-    ) -> Optional[Resolution]:
-        """Try fallback resources from the resolution's fallback chain."""
-        for fb_resource, fb_worker in failed_resolution.fallback_chain:
-            try:
-                fb_resolution = await self.router._resolve_resource(fb_resource)
-                if fb_resolution:
-                    logger.info(f"Fallback: using '{fb_resource.name}' instead")
-                    fb_resolution.tag = tag
-                    return fb_resolution
-            except Exception as e:
-                logger.warning(f"Fallback '{fb_resource.name}' failed: {e}")
-        return None
 
     async def _proxy_stream(
         self, target_url: str, headers: dict, body: bytes,
@@ -303,31 +231,9 @@ class PoolProxy:
 
         return headers
 
-    def _reset_idle_timer(self, resolution: Resolution) -> None:
-        """Reset the idle timer for the worker after a successful request."""
-        pass
-
-    def get_idle_timers(self) -> dict:
-        """Get current idle timer state."""
-        now = time.time()
-        result = {}
-        for worker_name, (resource, expires_at) in self._idle_timers.items():
-            remaining = max(0, expires_at - now)
-            if remaining > 0:
-                result[worker_name] = {
-                    "resource": resource,
-                    "expires_in_s": round(remaining),
-                }
-        return result
-
     async def close(self):
         """Clean up HTTP clients."""
         await self._http_client.aclose()
-        await self.router.close()
-
-
-class SwapError(Exception):
-    """Raised when a model swap fails."""
 
 
 def _safe_json(body: bytes) -> Optional[dict]:

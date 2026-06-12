@@ -1,21 +1,24 @@
-"""Tests for worker/watchdog.py - health monitor and auto-recovery.
+"""Tests for worker/watchdog.py - health monitor.
 
+Simplified for Architecture A: basic health monitoring only.
+No auto-recovery (since there's no dynamic swapping).
 Tests cover:
 - Health check success and failure counting
-- Auto-recovery after threshold failures
+- Failure threshold logging (but no auto-recovery)
 - No action when worker not in READY state
 - Watchdog start/stop lifecycle
 """
 
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-from modelpool.registry import Registry
 from modelpool.worker.loader import LlamaServerManager, READY, ERROR, IDLE, LOADING
 from modelpool.worker.watchdog import Watchdog
 
 
 def make_registry():
+    """Create a minimal registry (not needed by simplified watchdog but kept for compat)."""
+    from modelpool.registry import Registry
     data = {
         "resources": {
             "default-model": {
@@ -33,8 +36,6 @@ def make_registry():
         "workers": {
             "test-worker": {
                 "host": "10.0.0.1",
-                "default_resource": "default-model",
-                "swap_timeout": 30,
             },
         },
     }
@@ -50,8 +51,7 @@ class TestWatchdogCheck:
 
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker")
+        wd = Watchdog(mgr, check_interval=15, failure_threshold=3)
 
         wd._consecutive_failures = 2  # had some failures
         wd._check()
@@ -63,8 +63,7 @@ class TestWatchdogCheck:
 
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", failure_threshold=5)
+        wd = Watchdog(mgr, failure_threshold=5)
 
         wd._check()
         assert wd._consecutive_failures == 1
@@ -78,8 +77,7 @@ class TestWatchdogCheck:
 
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", failure_threshold=5)
+        wd = Watchdog(mgr, failure_threshold=5)
 
         wd._check()
         assert wd._consecutive_failures == 1
@@ -87,8 +85,7 @@ class TestWatchdogCheck:
     def test_check_skips_when_not_ready(self):
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = IDLE
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker")
+        wd = Watchdog(mgr)
 
         # Should be a no-op
         wd._check()
@@ -97,8 +94,7 @@ class TestWatchdogCheck:
     def test_check_skips_when_loading(self):
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = LOADING
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker")
+        wd = Watchdog(mgr)
 
         wd._check()
         assert wd._consecutive_failures == 0
@@ -110,63 +106,24 @@ class TestWatchdogCheck:
 
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", failure_threshold=3)
+        wd = Watchdog(mgr, failure_threshold=3)
 
         wd._check()
         assert wd._consecutive_failures == 1
 
-
-class TestWatchdogRecovery:
-    """Tests for auto-recovery after threshold failures."""
-
-    @patch.object(LlamaServerManager, "_wait_healthy", return_value=True)
-    @patch("modelpool.worker.loader.subprocess.Popen")
-    @patch("modelpool.worker.loader.requests.get")
     @patch("modelpool.worker.watchdog.requests.get")
-    def test_triggers_recovery_after_threshold(self, mock_wd_get, mock_loader_get, mock_popen, mock_wait):
-        # Health checks fail
-        mock_wd_get.side_effect = Exception("down")
-        # After recovery, Popen + _wait_healthy succeed
-        mock_popen.return_value = MagicMock(pid=123)
+    def test_threshold_reached_resets_counter(self, mock_get):
+        """When threshold is reached, counter resets (to avoid log spam)."""
+        mock_get.side_effect = Exception("down")
 
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-        mgr.process = MagicMock(pid=999)
-        mgr.loaded_resource = "broken-model"
+        wd = Watchdog(mgr, failure_threshold=3)
 
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", failure_threshold=3)
-
-        # Trigger 3 failures
         wd._check()  # 1
         wd._check()  # 2
-        assert wd._consecutive_failures == 2
-
-        wd._check()  # 3 -> triggers recovery
-        assert mgr.state == READY
-        assert mgr.loaded_resource == "default-model"
-        assert wd._consecutive_failures == 0
-
-    @patch.object(LlamaServerManager, "_wait_healthy", return_value=False)
-    @patch("modelpool.worker.loader.subprocess.Popen")
-    @patch("modelpool.worker.loader.requests.get")
-    @patch("modelpool.worker.watchdog.requests.get")
-    def test_recovery_failure_leaves_in_error(self, mock_wd_get, mock_loader_get, mock_popen, mock_wait):
-        mock_wd_get.side_effect = Exception("down")
-        mock_popen.return_value = MagicMock(pid=123)
-        # _wait_healthy returns False -> start fails
-
-        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-        mgr.state = READY
-        mgr.process = MagicMock(pid=999)
-
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", failure_threshold=2)
-
-        wd._check()
-        wd._check()  # triggers recovery, which fails
-        assert mgr.state == ERROR
+        wd._check()  # 3 -> threshold reached, counter resets
+        assert wd._consecutive_failures == 0  # reset after threshold
 
     @patch("modelpool.worker.watchdog.requests.get")
     def test_failure_count_resets_on_recovery(self, mock_get):
@@ -183,9 +140,7 @@ class TestWatchdogRecovery:
 
         mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
         mgr.state = READY
-
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", failure_threshold=5)
+        wd = Watchdog(mgr, failure_threshold=5)
 
         wd._check()  # fail 1
         assert wd._consecutive_failures == 1
@@ -193,6 +148,22 @@ class TestWatchdogRecovery:
         assert wd._consecutive_failures == 2
         wd._check()  # success -> reset
         assert wd._consecutive_failures == 0
+
+
+class TestNoAutoRecovery:
+    """Architecture A: watchdog has no auto-recovery logic."""
+
+    def test_no_recover_method(self):
+        """Watchdog should not have _recover method."""
+        assert not hasattr(Watchdog, "_recover")
+
+    def test_no_registry_dependency(self):
+        """Simplified watchdog doesn't need registry."""
+        mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
+        wd = Watchdog(mgr)
+        assert wd.manager is mgr
+        assert not hasattr(wd, "registry")
+        assert not hasattr(wd, "worker_name")
 
 
 class TestWatchdogLifecycle:
@@ -203,8 +174,7 @@ class TestWatchdogLifecycle:
 
         async def run():
             mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-            reg = make_registry()
-            wd = Watchdog(mgr, reg, "test-worker", check_interval=9999)
+            wd = Watchdog(mgr, check_interval=9999)
 
             wd.start()
             assert wd._running is True
@@ -219,8 +189,7 @@ class TestWatchdogLifecycle:
 
         async def run():
             mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-            reg = make_registry()
-            wd = Watchdog(mgr, reg, "test-worker", check_interval=9999)
+            wd = Watchdog(mgr, check_interval=9999)
 
             wd.start()
             task = wd._task
@@ -237,8 +206,7 @@ class TestWatchdogLifecycle:
 
         async def run():
             mgr = LlamaServerManager(8080, log_dir="/tmp/mp-test")
-            reg = make_registry()
-            wd = Watchdog(mgr, reg, "test-worker", check_interval=9999)
+            wd = Watchdog(mgr, check_interval=9999)
 
             wd.start()
             first_task = wd._task
@@ -250,14 +218,12 @@ class TestWatchdogLifecycle:
 
     def test_default_params(self):
         mgr = LlamaServerManager(8080)
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker")
+        wd = Watchdog(mgr)
         assert wd.check_interval == 15
         assert wd.failure_threshold == 3
 
     def test_custom_params(self):
         mgr = LlamaServerManager(8080)
-        reg = make_registry()
-        wd = Watchdog(mgr, reg, "test-worker", check_interval=5, failure_threshold=10)
+        wd = Watchdog(mgr, check_interval=5, failure_threshold=10)
         assert wd.check_interval == 5
         assert wd.failure_threshold == 10

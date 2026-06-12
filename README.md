@@ -1,70 +1,23 @@
-# modelpool
+# ModelPool
 
-On-demand LLM resource orchestration for homelab GPU clusters.
+Static resource pool for homelab LLM inference. Routes OpenAI-compatible requests to pre-assigned hardware based on task tags with priority-based failover.
 
-A **resource** is a fully configured model recipe -- the GGUF weights file plus every llama-server launch flag, tuned for specific hardware and a specific use case. ModelPool routes tasks to the right resource using **tag-based priority routing** with **generalist preference** and swaps models in and out of GPU memory as needed.
+## How It Works
 
-## How Routing Works
+1. Each GPU/CPU worker runs **one model, always loaded, started at boot**
+2. Tasks are tagged (chat, compression, title, triage, etc.) with priority tiers
+3. Pool proxy resolves a tag to the highest-priority available worker
+4. If tier 1 fails, tries tier 2, then tier 3, etc.
+5. Zero dynamic routing, zero model swapping, zero worker state queries
 
-Resources are tagged with priority levels. Lower number = preferred.
+## Resources
 
-```yaml
-resources:
-  gpu-27b:
-    generalist: true    # when loaded, serves any tag (no unnecessary swaps)
-    tags:
-      chat: 1           # best for chat
-      agentic: 1        # best for agents
-      code: 1           # best for coding
-      reasoning: 1      # best for reasoning
+### hwrouter (2x RX 9700 PRO, 64GB VRAM, ROCm)
 
-  gpu-35b:
-    tags:
-      compression: 1    # best for compression
-      title: 1          # best for titles
-      chat: 2            # fallback for chat
-
-  cpu-35b:
-    tags:
-      compression: 2    # GPU fallback
-      title: 2          # GPU fallback
-      chat: 3           # last resort
-```
-
-### Routing Rules (Priority Order)
-
-1. **Generalist preference**: If a resource marked `generalist: true` is already loaded on a worker with available capacity, use it for the request -- no swap needed.
-2. **Exact match**: If the requested resource is already loaded on a worker, use it.
-3. **Cold load**: If a worker is idle (no model loaded), load the best-priority resource.
-4. **Swap**: If a worker has a different model loaded and needs to swap, allow it (swaps replace, they don't add).
-5. **Fallback chain**: If all matching workers are unreachable or busy, try lower-priority resources.
-
-```
-Hermes sends model: "compression" -> pool looks up tag "compression"
-  -> Is the generalist (27B) loaded with capacity? -> use it (no swap)
-  -> Otherwise: gpu-35b (priority 1) -> worker available -> swap
-  -> if gpu-35b worker busy/unreachable -> cpu-35b (priority 2) -> fallback
-  -> if CPU also unavailable -> cloud (priority 3) -> last resort
-```
-
-### Worker Capacity
-
-Each worker has `max_concurrent_models` (user-defined policy, not auto-detected from GPU count). This controls how many different models can be loaded simultaneously on that worker. The router respects this limit when deciding whether to route to a worker.
-
-### No Rug Pulls
-
-The router will never swap a model on a worker that is in a busy state (loading, draining, stopping). If the best resource requires a swap on a busy worker, the router falls back to lower-priority resources rather than evicting a running model.
-
-## Current Resources
-
-### hwrouter (2x RX 9070 XT, 32GB VRAM, ROCm)
-
-| Resource | Model | Ctx | Speed (prompt/gen) | Tags (priority) | Generalist |
-|---|---|---|---|---|---|
-| `qwen36-27b_mtp_reasoning_multi-gpu` | 27B MTP Q4_K_M, reasoning ON | 131K | 728 / 33.8 t/s | chat:1, agentic:1, code:1, reasoning:1 | **Yes** |
-| `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | 35B MoE (3B active), reasoning OFF | 262K | 2,225 / 71.4 t/s | compression:1, title:1, summarize:1 | No |
-
-Swap time between resources: ~8 seconds.
+| Resource | Model | Ctx | Speed (prompt/gen) | Tags (priority) |
+|---|---|---|---|---|
+| `qwen36-27b_mtp_reasoning_multi-gpu` | 27B MTP Q4_K_M, reasoning ON | 131K | 728 / 33.8 t/s | chat:1, agentic:1, code:1, reasoning:1 |
+| `qwen36-35b-a3b_mtp_no-reasoning_multi-gpu` | 35B MoE (3B active), reasoning OFF | 262K | 2,225 / 71.4 t/s | compression:1, title:1, summarize:1 |
 
 ### pvellm (AMD 9850X3D, 48GB RAM, ik_llama.cpp)
 
@@ -82,17 +35,27 @@ Swap time between resources: ~8 seconds.
 ## Architecture
 
 ```
-Hermes -> Pool Proxy (:9000) -> Worker Agent (:9100) -> llama-server (:8080)
-                                        |
-                                   swaps models on demand
+Hermes -> Pool Proxy (:9000) -> Worker (:8080) -> llama-server
+    |                              or
+    +-- tag "chat" -------------> tier 1: 27B GPU
+    +-- tag "compression" ------> tier 1: 35B GPU
+    +-- if tier 1 fails --------> tier 2: 35B CPU
+    +-- if tier 2 fails --------> tier 3: cloud
 ```
 
-Workers are **paired** with a single pool proxy using a shared secret (`pool_secret`). Management endpoints (load, unload, revert) require the secret -- preventing multiple pool proxies from fighting over the same GPU. Status and health endpoints stay open for monitoring.
+Workers start their assigned model on boot via systemd. The pool proxy never queries worker state, never triggers swaps. It routes by tag priority and fails over on connection errors.
 
-1. **Define** resources in `resources.yaml` with tags, priorities, and worker secrets
-2. **Deploy** worker agents on each inference host (each with `pool_secret`)
-3. **Deploy** one pool proxy per Hermes instance (reads secrets from registry)
-4. **Pool proxy** resolves tags, authenticates to workers, handles swapping
+1. **Define** resources in `resources.yaml` with tags and priorities
+2. **Deploy** workers on each inference host (each boots with its assigned model)
+3. **Deploy** one pool proxy per Hermes instance
+4. **Pool proxy** resolves tags, proxies requests, handles failover
+
+### Routing Rules
+
+- Tag resolved from: `X-Task-Type` header > `model` field in body > default "chat"
+- Router returns candidates in priority order (tier 1, tier 2, tier 3...)
+- Proxy tries tier 1 first; on connection failure, tries tier 2, etc.
+- External (cloud) resources always available as last resort
 
 ### Worker Pairing
 
@@ -101,16 +64,11 @@ Workers are **paired** with a single pool proxy using a shared secret (`pool_sec
 workers:
   gpu-host:
     host: 192.168.35.185
-    pool_secret: mp-secret-homelab   # shared secret with pool proxy
-    max_concurrent_models: 1         # how many models this worker can run at once
+    pool_secret: mp-secret-homelab
 ```
 
-- Worker rejects management commands without the correct `X-Pool-Secret` header
-- Secret comparison uses `hmac.compare_digest()` for timing safety
-- Pool proxy reads the secret from the registry and sends it with every swap/load
-- Path-based middleware strips trailing slashes to prevent bypass
-- `GET /worker/status` shows `paired: true/false`
-- One pool proxy per Hermes instance = no GPU fighting
+- `/worker/status` and `/worker/ready` are open for monitoring
+- Worker starts model at boot and serves until stopped
 
 ## Quick Start
 
@@ -118,7 +76,7 @@ workers:
 # Install
 pip install -e ".[dev]"
 
-# Start worker (manages llama-server on this host)
+# Start worker (loads assigned model at boot)
 modelpool-worker --config worker.yaml --registry resources.yaml
 
 # Start pool proxy (routes by tags)
@@ -132,17 +90,15 @@ curl http://localhost:9000/v1/chat/completions \
 # Send a compression request (routed by tag "compression")
 curl http://localhost:9000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"compression","messages":[{"role":"user","content":"Compress this text..."}]}'
+  -d '{"model":"compression","messages":[{"role":"user","content":"Compress this..."}]}'
 ```
 
 ## Hermes Integration
 
-Configure Hermes to use the pool proxy as a provider:
-
 ```yaml
 # ~/.hermes/config.yaml
 model:
-  default: chat                  # maps to tag "chat" in pool
+  default: chat
   provider: custom:modelpool
 
 providers:
@@ -153,31 +109,13 @@ providers:
 auxiliary:
   compression:
     provider: custom:modelpool
-    model: compression            # maps to tag "compression" in pool
+    model: compression
   title_generation:
     provider: custom:modelpool
     model: compression
 ```
 
-Hermes sends `model: chat` or `model: compression` -> pool resolves the tag -> picks the best available resource. Hermes never knows about specific model names or workers.
-
-## Worker Management
-
-```bash
-# Status
-curl http://localhost:9100/worker/status
-
-# Load a resource (swaps model)
-curl -X POST localhost:9100/worker/load -d '{"resource":"qwen36-35b-a3b_mtp_no-reasoning_multi-gpu"}'
-
-# Revert to default
-curl -X POST localhost:9100/worker/revert
-
-# Unload (free GPU/CPU memory)
-curl -X POST localhost:9100/worker/unload
-```
-
-Workers start idle (no model loaded) when `idle_shutdown > 0` is configured. Models load on demand, unload after 15 minutes of inactivity.
+Hermes sends `model: chat` or `model: compression` -> pool resolves tag -> picks highest priority -> proxies.
 
 ## Testing
 
@@ -186,18 +124,18 @@ Workers start idle (no model loaded) when `idle_shutdown > 0` is configured. Mod
 pytest tests/ -q
 
 # Run only routing tests
-pytest tests/unit/test_pool_routing.py -v
-
-# Run benchmark scripts (requires live pool)
-python tests/bench/bench_resource.py --endpoint http://localhost:9000/v1
+pytest tests/unit/test_router.py -v
 ```
 
-200 tests covering:
+149 tests covering:
 - Registry parsing, validation, lookups
-- Async router tag resolution with cached worker status
-- Generalist preference, capacity enforcement, fallback behavior
-- Worker subprocess lifecycle (state machine, command building, drain/stop/start)
-- Worker watchdog (health checks, auto-recovery)
-- Pool proxy (auth injection, swap triggering, streaming, fallbacks)
-- Worker + pool server endpoints and middleware
-- Code review regression tests (secret headers, double parse, async threading)
+- Tag-based priority routing (sync, in-memory)
+- Worker subprocess lifecycle (start, stop, command building)
+- Pool proxy (streaming, auth injection, failover)
+- Worker endpoints (status, ready, health)
+- Pool endpoints (status, routing)
+
+## Branches
+
+- `main` -- Architecture A: static pool, priority-based failover
+- `arch/dynamic-pool` -- Architecture B: dynamic swapping, generalist preference, worker state queries

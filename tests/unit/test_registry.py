@@ -76,7 +76,6 @@ def valid_registry_yaml(tmp_path):
                 "type": "managed",
                 "vram_gb": 24,
                 "max_model_gb": 20,
-                "default_resource": "test-gpu-model",
                 "pool_secret": "test-secret-123",
             },
             "cloud-test": {
@@ -217,10 +216,6 @@ class TestWorkerLookup:
 
 
 class TestAssociations:
-    def test_get_default_resource(self, registry):
-        r = registry.get_default_resource("test-worker")
-        assert r.name == "test-gpu-model"
-
     def test_get_resources_for_worker(self, registry):
         resources = registry.get_resources_for_worker("test-worker")
         assert len(resources) == 2
@@ -339,48 +334,24 @@ class TestValidation:
         assert reg.resolve_tag("chat")
 
 
-class TestNewFields:
-    """Tests for generalist and max_concurrent_models fields."""
+class TestRemovedFields:
+    """Architecture A: generalist, max_concurrent_models, default_resource removed."""
 
-    def test_resource_generalist_defaults_false(self, registry):
-        """Resources without generalist flag should default to False."""
+    def test_resource_no_generalist_field(self, registry):
+        """Resources should not have generalist field."""
         for res in registry.resources.values():
-            assert hasattr(res, "generalist")
-            # In our test data none are marked generalist yet
-            assert res.generalist is False
+            assert not hasattr(res, "generalist")
 
-    def test_worker_max_concurrent_models_default(self, registry):
-        """Workers should have max_concurrent_models with default 1."""
+    def test_worker_no_max_concurrent_models(self, registry):
+        """Workers should not have max_concurrent_models field."""
         for worker in registry.workers.values():
-            assert hasattr(worker, "max_concurrent_models")
-            assert worker.max_concurrent_models >= 1
+            assert not hasattr(worker, "max_concurrent_models")
 
-    def test_generalist_can_be_set_true(self, tmp_path):
-        """A resource can be marked as generalist."""
-        data = {
-            "resources": {
-                "gen-model": {
-                    "type": "managed",
-                    "size_gb": 16,
-                    "ctx": 131072,
-                    "workers": ["gpu-worker"],
-                    "tags": {"chat": 1},
-                    "generalist": True,
-                    "command": {"binary": "/bin/test", "flags": [["-m", "test.gguf"]]},
-                }
-            },
-            "workers": {
-                "gpu-worker": {
-                    "host": "127.0.0.1",
-                    "max_concurrent_models": 2,
-                }
-            },
-        }
-        path = tmp_path / "resources.yaml"
-        with open(path, "w") as f:
-            yaml.dump(data, f)
-        reg = Registry.from_file(path)
-        res = reg.resources["gen-model"]
-        assert res.generalist is True
-        w = reg.workers["gpu-worker"]
-        assert w.max_concurrent_models == 2
+    def test_worker_no_default_resource(self, registry):
+        """Workers should not have default_resource field."""
+        for worker in registry.workers.values():
+            assert not hasattr(worker, "default_resource")
+
+    def test_no_get_default_resource_method(self, registry):
+        """Registry should not have get_default_resource method."""
+        assert not hasattr(registry, "get_default_resource")

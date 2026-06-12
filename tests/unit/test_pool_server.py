@@ -1,18 +1,15 @@
 """Tests for pool/server.py - pool management endpoints.
 
+Simplified for Architecture A: static pool, no dynamic swapping.
 Tests cover:
-- Pool status aggregation
-- Routing table endpoint
-- Manual swap and revert
-- Idle timer loop (with pool_secret header)
+- Pool routing table endpoint
+- Pool status endpoint
 - Configuration validation
 """
 
-import json
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from modelpool.registry import Registry
@@ -30,7 +27,6 @@ def make_test_registry():
                 "ctx": 131072,
                 "workers": ["hwrouter"],
                 "tags": {"chat": 1},
-                "generalist": True,
                 "command": {"binary": "/bin/test", "flags": [["-m", "27b.gguf"]]},
             },
             "gpu-35b": {
@@ -46,8 +42,6 @@ def make_test_registry():
             "hwrouter": {
                 "host": "192.168.35.185",
                 "pool_secret": "mp-secret",
-                "default_resource": "gpu-27b",
-                "max_concurrent_models": 1,
             },
         },
     }
@@ -68,9 +62,7 @@ class TestPoolRouting:
 
     def test_routing_returns_all_tags(self):
         reg, router, proxy = setup_pool()
-
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
+        client = TestClient(pool_server.app)
         resp = client.get("/pool/routing")
         assert resp.status_code == 200
 
@@ -82,9 +74,7 @@ class TestPoolRouting:
 
     def test_routing_shows_priorities(self):
         reg, router, proxy = setup_pool()
-
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
+        client = TestClient(pool_server.app)
         resp = client.get("/pool/routing")
         data = resp.json()
 
@@ -97,140 +87,43 @@ class TestPoolRouting:
 class TestPoolStatus:
     """Tests for /pool/status endpoint."""
 
-    @pytest.mark.asyncio
-    async def test_status_returns_workers(self):
-        async def mock_status(worker):
-            return {"state": "idle", "loaded_resource": None}
-
-        with patch.object(Router, "_get_worker_status", side_effect=mock_status):
-            reg, router, proxy = setup_pool()
-
-            from starlette.testclient import TestClient as TC
-            client = TC(pool_server.app)
-            resp = client.get("/pool/status")
-            assert resp.status_code == 200
-
-            data = resp.json()
-            assert "workers" in data
-            assert "hwrouter" in data["workers"]
-
-
-class TestPoolSwap:
-    """Tests for /pool/swap endpoint."""
-
-    def test_swap_missing_params_returns_400(self):
+    def test_status_returns_workers(self):
         reg, router, proxy = setup_pool()
+        client = TestClient(pool_server.app)
+        resp = client.get("/pool/status")
+        assert resp.status_code == 200
 
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
-        resp = client.post("/pool/swap", json={})
-        assert resp.status_code == 400
+        data = resp.json()
+        assert "workers" in data
+        assert "hwrouter" in data["workers"]
 
-    def test_swap_unknown_worker_returns_404(self):
+    def test_status_returns_resources(self):
         reg, router, proxy = setup_pool()
+        client = TestClient(pool_server.app)
+        resp = client.get("/pool/status")
+        data = resp.json()
+        assert "resources" in data
+        assert "gpu-27b" in data["resources"]
 
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
-        resp = client.post("/pool/swap", json={"worker": "nonexistent", "resource": "gpu-27b"})
-        assert resp.status_code == 404
 
-    def test_swap_resource_not_for_worker_returns_422(self):
-        """Resource not compatible with worker."""
-        # Add a resource for a different worker
-        data = {
-            "resources": {
-                "gpu-27b": {
-                    "type": "managed", "size_gb": 16, "ctx": 131072,
-                    "workers": ["hwrouter"], "tags": {"chat": 1},
-                    "command": {"binary": "/bin/test", "flags": [["-m", "27b.gguf"]]},
-                },
-                "cpu-model": {
-                    "type": "managed", "size_gb": 10, "ctx": 4096,
-                    "workers": ["other-worker"], "tags": {"triage": 1},
-                    "command": {"binary": "/bin/test", "flags": [["-m", "cpu.gguf"]]},
-                },
-            },
-            "workers": {
-                "hwrouter": {"host": "10.0.0.1", "pool_secret": "secret"},
-                "other-worker": {"host": "10.0.0.2", "pool_secret": "secret"},
-            },
-        }
-        reg = Registry(data)
-        router = Router(reg)
-        proxy = PoolProxy(reg, router)
-        pool_server.configure(reg, router, proxy)
+class TestRemovedEndpoints:
+    """Architecture A: dynamic pool endpoints removed."""
 
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
-        resp = client.post("/pool/swap", json={"worker": "hwrouter", "resource": "cpu-model"})
-        assert resp.status_code == 422
-
-    @patch("requests.post")
-    def test_swap_includes_pool_secret(self, mock_post):
-        """Manual swap must send pool_secret header to worker."""
-        mock_post.return_value = MagicMock(
-            status_code=202,
-            json=lambda: {"status": "loaded"},
-        )
-
+    def test_no_swap_endpoint(self):
         reg, router, proxy = setup_pool()
-
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
+        client = TestClient(pool_server.app)
         resp = client.post("/pool/swap", json={"worker": "hwrouter", "resource": "gpu-35b"})
+        assert resp.status_code == 404  # endpoint doesn't exist
 
-        # Verify the POST to worker included secret
-        post_call = mock_post.call_args
-        headers = post_call[1].get("headers", {})
-        assert headers.get("X-Pool-Secret") == "mp-secret"
-
-
-class TestPoolRevert:
-    """Tests for /pool/revert endpoint."""
-
-    def test_revert_missing_worker_returns_400(self):
+    def test_no_revert_endpoint(self):
         reg, router, proxy = setup_pool()
-
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
-        resp = client.post("/pool/revert", json={})
-        assert resp.status_code == 400
-
-    def test_revert_unknown_worker_returns_404(self):
-        reg, router, proxy = setup_pool()
-
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
-        resp = client.post("/pool/revert", json={"worker": "nonexistent"})
-        assert resp.status_code == 404
-
-    @patch("requests.post")
-    def test_revert_includes_pool_secret(self, mock_post):
-        """Manual revert must send pool_secret header."""
-        mock_post.return_value = MagicMock(
-            status_code=202,
-            json=lambda: {"status": "reverted"},
-        )
-
-        reg, router, proxy = setup_pool()
-
-        from starlette.testclient import TestClient as TC
-        client = TC(pool_server.app)
+        client = TestClient(pool_server.app)
         resp = client.post("/pool/revert", json={"worker": "hwrouter"})
+        assert resp.status_code == 404  # endpoint doesn't exist
 
-        post_call = mock_post.call_args
-        headers = post_call[1].get("headers", {})
-        assert headers.get("X-Pool-Secret") == "mp-secret"
-
-
-class TestIdleTimerLoop:
-    """Tests for the idle timer background loop."""
-
-    def test_idle_timer_loop_includes_pool_secret(self):
-        """Verify the idle revert code includes X-Pool-Secret header."""
+    def test_no_idle_timer_loop(self):
+        """Architecture A: no idle timer background loop."""
         import inspect
         from modelpool.pool import server
-        source = inspect.getsource(server._idle_timer_loop)
-        # The idle timer should include X-Pool-Secret in its revert POST
-        assert "X-Pool-Secret" in source, "Idle timer revert must include X-Pool-Secret"
-        assert "pool_secret" in source, "Idle timer must check pool_secret"
+        source = inspect.getsource(server)
+        assert "_idle_timer_loop" not in source

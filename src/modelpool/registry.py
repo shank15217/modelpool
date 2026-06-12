@@ -38,7 +38,6 @@ class Resource:
     workers: list[str] = field(default_factory=list)
     tags: dict[str, int] = field(default_factory=dict)  # tag -> priority (lower=better)
     benchmark: Benchmark = field(default_factory=Benchmark)
-    generalist: bool = False   # when loaded, prefer for any tag if capacity exists
 
     # Managed resource fields
     binary: Optional[str] = None
@@ -64,11 +63,7 @@ class Worker:
     vram_gb: float = 0.0
     ram_gb: float = 0.0
     max_model_gb: float = 0.0
-    swap_timeout: int = 120
-    drain_timeout: int = 30
-    default_resource: Optional[str] = None
     pool_secret: Optional[str] = None  # shared secret for pool-worker pairing
-    max_concurrent_models: int = 1  # how many different models this worker can run at once
 
     @property
     def worker_url(self) -> str:
@@ -119,13 +114,6 @@ class Registry:
         if name not in self._workers:
             raise RegistryError(f"Worker not found: {name}")
         return self._workers[name]
-
-    def get_default_resource(self, worker_name: str) -> Resource:
-        """Get the default resource for a worker."""
-        worker = self.get_worker(worker_name)
-        if not worker.default_resource:
-            raise RegistryError(f"Worker {worker_name} has no default resource")
-        return self.get_resource(worker.default_resource)
 
     def get_resources_for_worker(self, worker_name: str) -> list[Resource]:
         """Get all resources that can be served by a worker."""
@@ -203,7 +191,6 @@ class Registry:
                 workers=rdef.get("workers", []),
                 tags=rdef.get("tags", {}),
                 benchmark=benchmark,
-                generalist=rdef.get("generalist", False),
                 binary=rdef.get("command", {}).get("binary"),
                 flags=rdef.get("command", {}).get("flags", []),
                 endpoint=rdef.get("endpoint"),
@@ -223,11 +210,7 @@ class Registry:
                 vram_gb=wdef.get("vram_gb", 0.0),
                 ram_gb=wdef.get("ram_gb", 0.0),
                 max_model_gb=wdef.get("max_model_gb", 0.0),
-                swap_timeout=wdef.get("swap_timeout", 120),
-                drain_timeout=wdef.get("drain_timeout", 30),
-                default_resource=wdef.get("default_resource"),
                 pool_secret=wdef.get("pool_secret"),
-                max_concurrent_models=wdef.get("max_concurrent_models", 1),
             )
             self._workers[name] = worker
 
@@ -266,11 +249,6 @@ class Registry:
         for name, worker in self._workers.items():
             if worker.is_managed and not worker.host:
                 errors.append(f"Worker '{name}': managed worker missing host")
-            if worker.default_resource:
-                if worker.default_resource not in self._resources:
-                    errors.append(
-                        f"Worker '{name}': default_resource '{worker.default_resource}' not found"
-                    )
 
         # Validate size constraints
         for name, res in self._resources.items():

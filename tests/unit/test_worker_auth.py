@@ -1,7 +1,11 @@
-"""Tests for worker pool_secret authentication middleware."""
+"""Tests for worker pool_secret authentication middleware.
+
+Simplified for Architecture A: status and ready endpoints only (both open).
+No load/unload/revert endpoints to protect.
+"""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from modelpool.worker.server import app, configure, SECRET_HEADER
@@ -26,7 +30,6 @@ def mock_deps():
             "test-worker": {
                 "host": "localhost",
                 "type": "managed",
-                "default_resource": "test-model",
             },
         },
     }
@@ -44,16 +47,16 @@ def mock_deps():
 @pytest.fixture
 def client_no_secret(mock_deps):
     """Worker without pool_secret -- open mode."""
-    registry, manager, watchdog = mock_deps
-    configure(manager, registry, watchdog, "test-worker", pool_secret=None)
+    _, manager, watchdog = mock_deps
+    configure(manager, watchdog, pool_secret=None)
     return TestClient(app)
 
 
 @pytest.fixture
 def client_with_secret(mock_deps):
     """Worker with pool_secret -- paired mode."""
-    registry, manager, watchdog = mock_deps
-    configure(manager, registry, watchdog, "test-worker", pool_secret="my-secret")
+    _, manager, watchdog = mock_deps
+    configure(manager, watchdog, pool_secret="my-secret")
     return TestClient(app)
 
 
@@ -80,63 +83,23 @@ class TestWorkerAuth:
         resp = client_with_secret.get("/worker/status")
         assert resp.json()["paired"] is True
 
-    def test_load_rejected_without_secret(self, client_with_secret):
-        """Load endpoint rejects requests without the secret."""
-        resp = client_with_secret.post("/worker/load", json={"resource": "test-model"})
-        assert resp.status_code == 403
-        assert "pool secret" in resp.json()["error"].lower()
-
-    def test_load_rejected_with_wrong_secret(self, client_with_secret):
-        """Load endpoint rejects requests with wrong secret."""
-        resp = client_with_secret.post(
-            "/worker/load",
-            json={"resource": "test-model"},
-            headers={SECRET_HEADER: "wrong-secret"},
-        )
-        assert resp.status_code == 403
-
-    def test_load_accepted_with_correct_secret(self, client_with_secret, mock_deps):
-        """Load endpoint accepts requests with correct secret."""
-        _, manager, _ = mock_deps
-        manager.state = "idle"
-        manager.loaded_resource = None
-        manager.is_ready.return_value = False
-        manager.load_resource.return_value = None
-
-        resp = client_with_secret.post(
-            "/worker/load",
-            json={"resource": "test-model"},
-            headers={SECRET_HEADER: "my-secret"},
-        )
-        # Should not be 403
-        assert resp.status_code in (200, 202)
-
-    def test_unload_rejected_without_secret(self, client_with_secret):
-        """Unload endpoint rejects without secret."""
-        resp = client_with_secret.post("/worker/unload")
-        assert resp.status_code == 403
-
-    def test_revert_rejected_without_secret(self, client_with_secret):
-        """Revert endpoint rejects without secret."""
-        resp = client_with_secret.post("/worker/revert")
-        assert resp.status_code == 403
-
     def test_ready_open_without_secret(self, client_with_secret):
         """Ready endpoint stays open for health checks."""
         resp = client_with_secret.get("/worker/ready")
         # Should not be 403 (503 is expected since no model loaded)
         assert resp.status_code != 403
 
-    def test_no_secret_means_open(self, client_no_secret, mock_deps):
-        """Without pool_secret, all endpoints are open."""
-        _, manager, _ = mock_deps
-        manager.state = "idle"
-        manager.loaded_resource = None
+    def test_no_load_endpoint(self, client_with_secret):
+        """Architecture A: no /worker/load endpoint."""
+        resp = client_with_secret.post("/worker/load", json={"resource": "test-model"})
+        assert resp.status_code == 404
 
-        # Load should proceed (not rejected with 403)
-        resp = client_no_secret.post("/worker/load", json={"resource": "test-model"})
-        assert resp.status_code != 403
+    def test_no_unload_endpoint(self, client_with_secret):
+        """Architecture A: no /worker/unload endpoint."""
+        resp = client_with_secret.post("/worker/unload")
+        assert resp.status_code == 404
 
-        # Unload should proceed
-        resp = client_no_secret.post("/worker/unload")
-        assert resp.status_code != 403
+    def test_no_revert_endpoint(self, client_with_secret):
+        """Architecture A: no /worker/revert endpoint."""
+        resp = client_with_secret.post("/worker/revert")
+        assert resp.status_code == 404

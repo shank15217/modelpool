@@ -1,33 +1,31 @@
-"""Worker watchdog - background health monitor for llama-server."""
+"""Worker watchdog - background health monitor for llama-server.
+
+Simplified for Architecture A: basic health monitoring only, no auto-recovery
+(since there's no dynamic swapping to fall back to).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 
 import requests
 
-from modelpool.worker.loader import LlamaServerManager, READY, ERROR
-from modelpool.registry import Registry
+from modelpool.worker.loader import LlamaServerManager, READY
 
 logger = logging.getLogger("modelpool.worker.watchdog")
 
 
 class Watchdog:
-    """Monitors llama-server health and auto-recovers on failure."""
+    """Monitors llama-server health and logs failures."""
 
     def __init__(
         self,
         manager: LlamaServerManager,
-        registry: Registry,
-        worker_name: str,
         check_interval: int = 15,
         failure_threshold: int = 3,
     ):
         self.manager = manager
-        self.registry = registry
-        self.worker_name = worker_name
         self.check_interval = check_interval
         self.failure_threshold = failure_threshold
         self._consecutive_failures = 0
@@ -89,30 +87,8 @@ class Watchdog:
 
         if self._consecutive_failures >= self.failure_threshold:
             logger.error(
-                f"Health check failed {self.failure_threshold} times, "
-                f"triggering auto-recovery"
+                f"Health check failed {self.failure_threshold} times consecutively. "
+                f"Manual intervention may be needed."
             )
-            self._recover()
-
-    def _recover(self) -> None:
-        """Attempt to recover by restarting with the default resource."""
-        self.manager.state = ERROR
-        self._consecutive_failures = 0
-
-        try:
-            # Force stop the broken process
-            self.manager.stop(timeout=5)
-        except Exception as e:
-            logger.error(f"Failed to stop broken process: {e}")
-            self.manager.process = None
-            self.manager.state = ERROR
-
-        try:
-            # Load the default resource
-            worker = self.registry.get_worker(self.worker_name)
-            default = self.registry.get_default_resource(self.worker_name)
-            logger.info(f"Auto-recovering with default resource: {default.name}")
-            self.manager.start(default, timeout=worker.swap_timeout)
-            logger.info("Auto-recovery successful")
-        except Exception as e:
-            logger.error(f"Auto-recovery failed: {e}")
+            # Reset counter so we don't spam logs every check
+            self._consecutive_failures = 0
