@@ -1,0 +1,51 @@
+{
+  "engine": "vLLM",
+  "model": "Qwen3.6-27B-FP8",
+  "hardware": "2x RX 9700 PRO, TP=2",
+  "toolbox": "kyuz0/amd-r9700-vllm-toolboxes (AITER unified attention)",
+  "config": {
+    "tensor_parallel": 2,
+    "max_model_len": 262144,
+    "kv_cache_dtype": "fp8",
+    "chunked_prefill": true,
+    "prefix_caching": true,
+    "gpu_utilization": 0.90,
+    "attention_backend": "ROCM_AITER_UNIFIED_ATTN"
+  },
+  "summary": {
+    "prompt_eval_8K_avg_tps": 2371.7,
+    "generation_512_avg_tps": 27.1,
+    "runs": [
+      {"run": 1, "pe_8K": 1776.0, "gen_512": 27.1},
+      {"run": 2, "pe_8K": 2673.0, "gen_512": 27.2},
+      {"run": 3, "pe_8K": 2666.2, "gen_512": 27.1}
+    ]
+  },
+  "detailed": {
+    "prompt_eval": {
+      "1K": 974.6,
+      "4K": 2326.8,
+      "8K": 2371.7,
+      "16K": 3161.0,
+      "32K": 3117.0
+    },
+    "generation": {
+      "64": 29.0,
+      "256": 28.3,
+      "512": 27.1
+    },
+    "realworld": {
+      "title_3K": 1999,
+      "triage_2K": 2681,
+      "summarize_8K": 593,
+      "code_review": 36
+    }
+  },
+  "concurrent": {
+    "1_agent": {"wall_clock": 14.6, "throughput": 31.3, "gen_per_agent": 27.5},
+    "2_agents": {"wall_clock": 15.4, "throughput": 51.0, "gen_per_agent": 19.4},
+    "4_agents": {"wall_clock": 15.7, "throughput": 87.2, "gen_per_agent": 13.6},
+    "8_agents": {"wall_clock": 19.0, "throughput": 148.6, "gen_per_agent": 12.5}
+  },
+  "timestamp": "2026-06-03"
+}

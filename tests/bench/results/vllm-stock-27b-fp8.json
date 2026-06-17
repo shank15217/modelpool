@@ -1,0 +1,43 @@
+{
+  "engine": "vLLM",
+  "model": "Qwen3.6-27B-FP8",
+  "hardware": "2x RX 9700 PRO, TP=2",
+  "config": {
+    "tensor_parallel": 2,
+    "max_model_len": 262144,
+    "kv_cache_dtype": "fp8",
+    "chunked_prefill": true,
+    "prefix_caching": true,
+    "gpu_utilization": 0.90
+  },
+  "summary": {
+    "prompt_eval_8K_avg_tps": 2017.5,
+    "generation_512_avg_tps": 26.5,
+    "runs": [
+      {"run": 1, "pe_8K": 2016.2, "gen_512": 26.4},
+      {"run": 2, "pe_8K": 2031.7, "gen_512": 26.5},
+      {"run": 3, "pe_8K": 2004.7, "gen_512": 26.5}
+    ]
+  },
+  "detailed": {
+    "prompt_eval": {
+      "1K": 884.9,
+      "4K": 1839.0,
+      "8K": 2017.5,
+      "16K": 2310.0,
+      "32K": 2241.0
+    },
+    "generation": {
+      "64": 29.2,
+      "256": 28.2,
+      "512": 26.5
+    },
+    "realworld": {
+      "title_3K": 1623,
+      "triage_2K": 2292,
+      "summarize_8K": 450,
+      "code_review": 36
+    }
+  },
+  "timestamp": "2026-06-03"
+}
