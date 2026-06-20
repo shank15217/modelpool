@@ -50,7 +50,8 @@ def chat(endpoint: str, messages: list, max_tokens: int = 256, temperature: floa
     usage = data.get("usage", {})
     pt = usage.get("prompt_tokens", 0)
     ct = usage.get("completion_tokens", 0)
-    content = data["choices"][0]["message"]["content"][:100].replace("\n", " ")
+    choice = data["choices"][0]["message"]
+    content = (choice.get("content") or choice.get("reasoning") or "")[:100].replace("\n", " ")
     return {
         "prompt_tokens": pt,
         "completion_tokens": ct,
